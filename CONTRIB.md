@@ -1,3 +1,15 @@
+<div align="center">
+
+<p align="center">
+  <a href="README.md">📖 README</a> &nbsp;|&nbsp;
+  <a href="ABOUT.md">💡 About</a> &nbsp;|&nbsp;
+  <a href="CONTRIB.md"><b>🤝 Contributing</b></a> &nbsp;|&nbsp;
+  <a href="https://github.com/Spiritbocs/OllamaUnofficial/issues">🐛 Issues</a> &nbsp;|&nbsp;
+  <a href="https://discord.gg/gV7FzbrJCu">💬 Discord</a>
+</p>
+
+</div>
+
 # Contributing to OllamaUnofficial
 
 Thanks for your interest in contributing! This document covers everything you need to know to get set up, make changes, and package a release.

@@ -8,6 +8,14 @@
 
 Run powerful AI models locally with Ollama, or tap into hundreds of free models from OpenRouter and Hugging Face — all from a sleek sidebar right inside VS Code.
 
+<p align="center">
+  <a href="README.md"><b>📖 README</b></a> &nbsp;|&nbsp;
+  <a href="ABOUT.md">💡 About</a> &nbsp;|&nbsp;
+  <a href="CONTRIB.md">🤝 Contributing</a> &nbsp;|&nbsp;
+  <a href="https://github.com/Spiritbocs/OllamaUnofficial/issues">🐛 Issues</a> &nbsp;|&nbsp;
+  <a href="https://discord.gg/gV7FzbrJCu">💬 Discord</a>
+</p>
+
 <br/>
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/gV7FzbrJCu)
@@ -57,6 +65,9 @@ VS Code → Ctrl+Shift+P → "Extensions: Install from VSIX…" → pick the fil
 ```
 
 ### 2 — Pick your provider
+
+> **Do I need to install Ollama?**
+> Only if you want to use the **Ollama provider** (local, private, offline). If you use **OpenRouter** or **Hugging Face** instead, you don't need Ollama installed at all — those run entirely in the cloud with just a free API key.
 
 Open the OllamaUnofficial sidebar, click the ⚙ settings icon, and choose a provider:
 
