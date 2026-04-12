@@ -1,0 +1,167 @@
+{
+  "name": "ollamaunofficial",
+  "displayName": "OllamaUnofficial",
+  "description": "Sidebar chat: Ollama (local), OpenRouter, and Hugging Face Inference — free-model friendly with secure API keys.",
+  "version": "0.0.1",
+  "publisher": "Spiritbocs",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onView:ollamaCoderChat.sidebar"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ollamaCoderChat",
+          "title": "Ollama Chat",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ollamaCoderChat": [
+        {
+          "type": "webview",
+          "id": "ollamaCoderChat.sidebar",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ollamaCoderChat.focus",
+        "title": "OllamaUnofficial: Focus Chat"
+      },
+      {
+        "command": "ollamaCoderChat.newChat",
+        "title": "OllamaUnofficial: New Chat Tab",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ollamaCoderChat.setOpenRouterApiKey",
+        "title": "OllamaUnofficial: Set OpenRouter API Key"
+      },
+      {
+        "command": "ollamaCoderChat.setHuggingFaceApiToken",
+        "title": "OllamaUnofficial: Set Hugging Face API Token"
+      },
+      {
+        "command": "ollamaCoderChat.showLog",
+        "title": "OllamaUnofficial: Show Log"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ollamaCoderChat.newChat",
+          "when": "view == ollamaCoderChat.sidebar",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Ollama Coder Chat",
+      "properties": {
+        "ollamaCoderChat.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Base URL for the local Ollama server."
+        },
+        "ollamaCoderChat.provider": {
+          "type": "string",
+          "enum": [
+            "ollama",
+            "openrouter",
+            "huggingface"
+          ],
+          "default": "ollama",
+          "description": "Where requests are sent: local Ollama, OpenRouter (cloud), or Hugging Face Inference router (cloud)."
+        },
+        "ollamaCoderChat.model": {
+          "type": "string",
+          "default": "llama3.2",
+          "description": "Active model id: Ollama tag (e.g. llama3.2:latest), OpenRouter model id, or Hugging Face model id."
+        },
+        "ollamaCoderChat.openRouterBaseUrl": {
+          "type": "string",
+          "default": "https://openrouter.ai/api/v1",
+          "description": "OpenRouter API base URL (OpenAI-compatible)."
+        },
+        "ollamaCoderChat.openRouterFreeOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "When listing OpenRouter models, only include models with $0 prompt and completion pricing."
+        },
+        "ollamaCoderChat.huggingfaceApiUrl": {
+          "type": "string",
+          "default": "https://router.huggingface.co/v1",
+          "description": "Hugging Face Inference OpenAI-compatible API base (v1/chat/completions)."
+        },
+        "ollamaCoderChat.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for chat requests (Ollama, OpenRouter, Hugging Face)."
+        },
+        "ollamaCoderChat.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 1,
+          "maximum": 128000,
+          "description": "Maximum tokens to generate (OpenRouter/HF: max_tokens; Ollama: num_predict)."
+        },
+        "ollamaCoderChat.topP": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.01,
+          "maximum": 1,
+          "description": "Nucleus sampling top_p for chat requests."
+        },
+        "ollamaCoderChat.approvalMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "auto",
+            "chat"
+          ],
+          "default": "ask",
+          "description": "How edits are handled when the assistant suggests code: confirm each change, assume changes are applied, or chat-only (no edit workflow)."
+        },
+        "ollamaCoderChat.models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra model ids to always show in the picker (merged with provider discovery)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "framework": "npm install -D typescript @types/node @types/vscode @types/dompurify esbuild && npm install marked dompurify",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^22.19.17",
+    "@types/vscode": "^1.115.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "dompurify": "^3.3.3",
+    "marked": "^18.0.0"
+  }
+}
