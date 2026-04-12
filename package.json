@@ -2,7 +2,7 @@
   "name": "ollamaunofficial",
   "displayName": "OllamaUnofficial",
   "description": "Sidebar chat: Ollama (local), OpenRouter, and Hugging Face Inference — free-model friendly with secure API keys.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "Spiritbocs",
   "license": "MIT",
   "engines": {
