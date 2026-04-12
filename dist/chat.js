@@ -2262,28 +2262,86 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     }
     return el;
   }
+  function getElOpt(id) {
+    return document.getElementById(id);
+  }
   function renderMarkdown(text2) {
     const raw = g.parse(text2, { async: false });
     return purify.sanitize(raw, { USE_PROFILES: { html: true } });
   }
+  function stripThinkingBlocks(text2) {
+    let thinking = "";
+    let visible = text2.replace(/<think>([\s\S]*?)<\/think>/g, (_match, inner) => {
+      thinking += (thinking ? "\n\n" : "") + inner.trim();
+      return "";
+    }).trim();
+    const openIdx = visible.lastIndexOf("<think>");
+    if (openIdx !== -1) {
+      const tail = visible.slice(openIdx + 7).trim();
+      if (tail) {
+        thinking += (thinking ? "\n\n" : "") + tail;
+      }
+      visible = visible.slice(0, openIdx).trim();
+    }
+    return { visible, thinking };
+  }
+  var SPINNER_HTML = `<div class="thinking-spinner"><div class="thinking-spinner-ring"></div><span>Working on it\u2026</span></div>`;
   function enhanceCodeBlocks(root) {
     root.querySelectorAll("pre").forEach((pre) => {
-      if (pre.querySelector(".copy-code-btn")) {
-        return;
-      }
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "copy-code-btn";
-      btn.textContent = "Copy";
-      btn.addEventListener("click", () => {
+      if (pre.querySelector(".code-actions")) return;
+      const actions = document.createElement("div");
+      actions.className = "code-actions";
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "code-action-btn";
+      copyBtn.textContent = "Copy";
+      copyBtn.addEventListener("click", () => {
         const code = pre.querySelector("code");
         void navigator.clipboard.writeText(code?.textContent ?? "");
-        btn.textContent = "Copied";
+        copyBtn.textContent = "Copied!";
         window.setTimeout(() => {
-          btn.textContent = "Copy";
+          copyBtn.textContent = "Copy";
         }, 1400);
       });
-      pre.appendChild(btn);
+      actions.appendChild(copyBtn);
+      const codeEl = pre.querySelector("code");
+      const langClass = codeEl?.className ?? "";
+      const langMatch = /language-(\w+)/.exec(langClass);
+      const language = langMatch?.[1] ?? "";
+      const rawCode = codeEl?.textContent ?? "";
+      const firstLine = rawCode.split("\n")[0].trim();
+      const fileMatch = /(?:\/\/|#|<!--)\s*[Ff]ile:\s*(.+?)(?:\s*-->)?$/.exec(firstLine);
+      const suggestedPath = fileMatch?.[1]?.trim();
+      const isShell = /^(bash|sh|shell|zsh|fish|powershell|ps1|cmd|batch)$/i.test(language);
+      const isOutput = /^(text|output|log|plain)$/i.test(language);
+      if (!isOutput) {
+        const applyBtn = document.createElement("button");
+        applyBtn.type = "button";
+        applyBtn.className = "code-action-btn code-action-apply";
+        applyBtn.textContent = suggestedPath ? `Apply \u2192 ${suggestedPath.split("/").pop() ?? suggestedPath}` : "Apply to File";
+        applyBtn.title = suggestedPath ? `Apply to ${suggestedPath}` : "Apply this code to a file in your workspace";
+        applyBtn.addEventListener("click", () => {
+          vscode.postMessage({
+            type: "applyFileEdit",
+            code: rawCode,
+            language,
+            suggestedPath
+          });
+        });
+        actions.appendChild(applyBtn);
+      }
+      if (isShell) {
+        const runBtn = document.createElement("button");
+        runBtn.type = "button";
+        runBtn.className = "code-action-btn code-action-run";
+        runBtn.textContent = "\u25B6 Run";
+        runBtn.title = "Run this command in the integrated terminal";
+        runBtn.addEventListener("click", () => {
+          vscode.postMessage({ type: "runInTerminal", command: rawCode.trim() });
+        });
+        actions.appendChild(runBtn);
+      }
+      pre.appendChild(actions);
     });
   }
   var promptEl = getEl("prompt");
@@ -2298,6 +2356,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var providerSelect = getEl("providerSelect");
   var sessionBar = getEl("sessionBar");
   var attachBtn = getEl("attachBtn");
+  var browseBtn = getElOpt("browseBtn");
   var attachMenu = getEl("attachMenu");
   var attachSearch = getEl("attachSearch");
   var attachmentRow = getEl("attachmentRow");
@@ -2309,6 +2368,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var settingsCloseBtn = getEl("settingsCloseBtn");
   var settingsCancelBtn = getEl("settingsCancelBtn");
   var settingsSaveBtn = getEl("settingsSaveBtn");
+  var settingsSavedToast = getEl("settingsSavedToast");
   var inputOpenRouterKey = getEl("inputOpenRouterKey");
   var inputHfKey = getEl("inputHfKey");
   var inputTemperature = getEl("inputTemperature");
@@ -2318,6 +2378,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var orKeyHint = getEl("orKeyHint");
   var hfKeyHint = getEl("hfKeyHint");
   var settingsPanelInner = getEl("settingsPanelInner");
+  var toggleOrKey = getEl("toggleOrKey");
+  var toggleHfKey = getEl("toggleHfKey");
+  var selectFileAccess = getEl("selectFileAccess");
+  var chkTerminalAccess = getEl("chkTerminalAccess");
+  var chkGitAccess = getEl("chkGitAccess");
   settingsPanelInner.addEventListener("click", (event) => {
     event.stopPropagation();
   });
@@ -2424,11 +2489,22 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     orKeyHint.textContent = message.hasOpenRouterKey ? "(saved)" : "";
     hfKeyHint.textContent = message.hasHuggingfaceKey ? "(saved)" : "";
     inputOpenRouterKey.value = "";
+    inputOpenRouterKey.type = "password";
+    toggleOrKey.textContent = "\u{1F441}";
     inputHfKey.value = "";
+    inputHfKey.type = "password";
+    toggleHfKey.textContent = "\u{1F441}";
     inputTemperature.value = String(message.temperature ?? 0.2);
     inputMaxTokens.value = String(message.maxTokens ?? 4096);
     inputTopP.value = String(message.topP ?? 1);
     chkOpenRouterFreeOnly.checked = Boolean(message.openRouterFreeOnly);
+    selectFileAccess.value = String(message.fileAccess ?? "none");
+    chkTerminalAccess.checked = Boolean(message.terminalAccess);
+    chkGitAccess.checked = Boolean(message.gitAccess);
+    updateCapabilityBadges(String(message.fileAccess ?? "none"), Boolean(message.terminalAccess), Boolean(message.gitAccess));
+    inputTemperature.classList.remove("invalid");
+    inputTopP.classList.remove("invalid");
+    inputMaxTokens.classList.remove("invalid");
     settingsOverlay.classList.remove("hidden");
     settingsOverlay.setAttribute("aria-hidden", "false");
   }
@@ -2440,9 +2516,31 @@ Please report this to https://github.com/markedjs/marked.`, e) {
       if (m2.role === "user") {
         createMessage("user", m2.content);
       } else if (m2.role === "assistant") {
-        const { bubble } = createMessage("assistant", "");
+        const { bubble, wrapper } = createMessage("assistant", "");
+        const { visible, thinking } = stripThinkingBlocks(m2.content);
+        if (thinking) {
+          const thinkingBlock = document.createElement("div");
+          thinkingBlock.className = "thinking-block";
+          const toggleBtn = document.createElement("button");
+          toggleBtn.type = "button";
+          toggleBtn.className = "thinking-toggle-btn";
+          toggleBtn.innerHTML = `<span class="thinking-toggle-arrow">\u25B6</span> Reasoning`;
+          thinkingBlock.appendChild(toggleBtn);
+          const thinkingContent = document.createElement("div");
+          thinkingContent.className = "thinking-content";
+          thinkingContent.textContent = thinking;
+          thinkingBlock.appendChild(thinkingContent);
+          toggleBtn.addEventListener("click", () => {
+            const isOpen = thinkingContent.classList.toggle("visible");
+            const arrow = toggleBtn.querySelector(".thinking-toggle-arrow");
+            if (arrow) {
+              arrow.textContent = isOpen ? "\u25BC" : "\u25B6";
+            }
+          });
+          wrapper.insertBefore(thinkingBlock, bubble);
+        }
         bubble.className = "bubble md";
-        bubble.innerHTML = renderMarkdown(m2.content);
+        bubble.innerHTML = renderMarkdown(visible || m2.content);
         enhanceCodeBlocks(bubble);
       }
     }
@@ -2453,6 +2551,33 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     modeAgent.classList.toggle("active", mode === "agent");
     modeAsk.classList.toggle("active", mode === "ask");
     modePlan.classList.toggle("active", mode === "plan");
+  }
+  function updateCapabilityBadges(fileAccess, terminalAccess, gitAccess) {
+    const capFile = getElOpt("capFile");
+    const capEdit = getElOpt("capEdit");
+    const capTerm = getElOpt("capTerm");
+    const capGit = getElOpt("capGit");
+    const capNav = getElOpt("capNav");
+    if (capFile) {
+      capFile.textContent = fileAccess === "readwrite" ? "Read+Write" : fileAccess === "read" ? "Read" : "Off";
+      capFile.className = "cap-val" + (fileAccess !== "none" ? " cap-on" : "");
+    }
+    if (capEdit) {
+      capEdit.textContent = fileAccess === "readwrite" ? "On" : "Off";
+      capEdit.className = "cap-val" + (fileAccess === "readwrite" ? " cap-on" : "");
+    }
+    if (capNav) {
+      capNav.textContent = fileAccess !== "none" ? "On" : "Off";
+      capNav.className = "cap-val" + (fileAccess !== "none" ? " cap-on" : "");
+    }
+    if (capTerm) {
+      capTerm.textContent = terminalAccess ? "On" : "Off";
+      capTerm.className = "cap-val" + (terminalAccess ? " cap-on" : "");
+    }
+    if (capGit) {
+      capGit.textContent = gitAccess ? "On" : "Off";
+      capGit.className = "cap-val" + (gitAccess ? " cap-on" : "");
+    }
   }
   function setMode(next) {
     mode = next;
@@ -2554,10 +2679,63 @@ Please report this to https://github.com/markedjs/marked.`, e) {
       closeSettingsPanel();
     }
   });
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+  function validateSettingsInputs() {
+    let valid = true;
+    const tempVal = Number(inputTemperature.value);
+    if (!Number.isFinite(tempVal) || tempVal < 0 || tempVal > 2) {
+      inputTemperature.classList.add("invalid");
+      valid = false;
+    } else {
+      inputTemperature.classList.remove("invalid");
+    }
+    const topPVal = Number(inputTopP.value);
+    if (!Number.isFinite(topPVal) || topPVal < 0.01 || topPVal > 1) {
+      inputTopP.classList.add("invalid");
+      valid = false;
+    } else {
+      inputTopP.classList.remove("invalid");
+    }
+    const maxTokVal = Number(inputMaxTokens.value);
+    if (!Number.isFinite(maxTokVal) || maxTokVal < 1 || maxTokVal > 128e3) {
+      inputMaxTokens.classList.add("invalid");
+      valid = false;
+    } else {
+      inputMaxTokens.classList.remove("invalid");
+    }
+    return valid;
+  }
+  var toastTimer;
+  function showSavedToast() {
+    settingsSavedToast.classList.add("visible");
+    if (toastTimer !== void 0) {
+      window.clearTimeout(toastTimer);
+    }
+    toastTimer = window.setTimeout(() => {
+      settingsSavedToast.classList.remove("visible");
+      toastTimer = void 0;
+    }, 1800);
+  }
+  function togglePasswordVisibility(input, btn) {
+    const isHidden = input.type === "password";
+    input.type = isHidden ? "text" : "password";
+    btn.textContent = isHidden ? "\u{1F648}" : "\u{1F441}";
+  }
+  toggleOrKey.addEventListener("click", () => {
+    togglePasswordVisibility(inputOpenRouterKey, toggleOrKey);
+  });
+  toggleHfKey.addEventListener("click", () => {
+    togglePasswordVisibility(inputHfKey, toggleHfKey);
+  });
   settingsSaveBtn.addEventListener("click", () => {
-    const temperature = Number(inputTemperature.value);
-    const maxTokens = Number(inputMaxTokens.value);
-    const topP = Number(inputTopP.value);
+    if (!validateSettingsInputs()) {
+      return;
+    }
+    const temperature = clamp(Number(inputTemperature.value), 0, 2);
+    const maxTokens = clamp(Math.round(Number(inputMaxTokens.value)), 1, 128e3);
+    const topP = clamp(Number(inputTopP.value), 0.01, 1);
     vscode.postMessage({
       type: "saveSettings",
       openRouterKey: inputOpenRouterKey.value.trim() || void 0,
@@ -2565,9 +2743,15 @@ Please report this to https://github.com/markedjs/marked.`, e) {
       temperature: Number.isFinite(temperature) ? temperature : void 0,
       maxTokens: Number.isFinite(maxTokens) ? maxTokens : void 0,
       topP: Number.isFinite(topP) ? topP : void 0,
-      openRouterFreeOnly: chkOpenRouterFreeOnly.checked
+      openRouterFreeOnly: chkOpenRouterFreeOnly.checked,
+      fileAccess: selectFileAccess.value,
+      terminalAccess: chkTerminalAccess.checked,
+      gitAccess: chkGitAccess.checked
     });
-    closeSettingsPanel();
+    showSavedToast();
+    window.setTimeout(() => {
+      closeSettingsPanel();
+    }, 900);
   });
   refreshModelsBtn.addEventListener("click", () => {
     vscode.postMessage({ type: "getModels" });
@@ -2597,6 +2781,24 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     event.stopPropagation();
     toggleAttachMenu();
   });
+  browseBtn?.addEventListener("click", () => {
+    vscode.postMessage({ type: "openBrowser" });
+  });
+  messagesEl.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    messagesEl.classList.add("drag-over");
+  });
+  messagesEl.addEventListener("dragleave", () => {
+    messagesEl.classList.remove("drag-over");
+  });
+  messagesEl.addEventListener("drop", (event) => {
+    event.preventDefault();
+    messagesEl.classList.remove("drag-over");
+    const file = event.dataTransfer?.files?.[0];
+    if (file) {
+      vscode.postMessage({ type: "pickLocalFile" });
+    }
+  });
   document.addEventListener("click", () => {
     closeMenus();
   });
@@ -2620,6 +2822,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
         vscode.postMessage({ type: "attachProblems" });
       } else if (action === "clipboardImage") {
         vscode.postMessage({ type: "attachClipboardImage" });
+      } else if (action === "localFile") {
+        vscode.postMessage({ type: "pickLocalFile" });
       } else if (action === "instructions") {
         vscode.postMessage({ type: "stub", feature: "instructions" });
       } else if (action === "symbols") {
@@ -2686,7 +2890,9 @@ Please report this to https://github.com/markedjs/marked.`, e) {
         pendingAssistantBubble = null;
         pendingAssistantWrapper = null;
       }
-      const { wrapper, bubble } = createMessage("assistant", "\u2026");
+      const { wrapper, bubble } = createMessage("assistant", "");
+      bubble.className = "bubble bubble-thinking";
+      bubble.innerHTML = SPINNER_HTML;
       pendingAssistantBubble = bubble;
       pendingAssistantWrapper = wrapper;
       return;
@@ -2704,8 +2910,15 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     }
     if (message?.type === "assistantDelta") {
       if (pendingAssistantBubble) {
-        pendingAssistantBubble.textContent = String(message.text ?? "");
-        pendingAssistantBubble.className = "bubble bubble-plain";
+        const raw = String(message.text ?? "");
+        const { visible } = stripThinkingBlocks(raw);
+        if (visible) {
+          pendingAssistantBubble.className = "bubble md";
+          pendingAssistantBubble.innerHTML = renderMarkdown(visible);
+        } else {
+          pendingAssistantBubble.className = "bubble bubble-thinking";
+          pendingAssistantBubble.innerHTML = SPINNER_HTML;
+        }
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
       return;
@@ -2713,17 +2926,40 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     if (message?.type === "assistantDone") {
       setBusy(false);
       const text2 = String(message.text ?? "");
-      if (pendingAssistantBubble) {
-        pendingAssistantBubble.className = "bubble md";
-        pendingAssistantBubble.innerHTML = renderMarkdown(text2);
-        enhanceCodeBlocks(pendingAssistantBubble);
+      const { visible, thinking } = stripThinkingBlocks(text2);
+      const finalize = (bubble, wrapper) => {
+        if (thinking) {
+          const thinkingBlock = document.createElement("div");
+          thinkingBlock.className = "thinking-block";
+          const toggleBtn = document.createElement("button");
+          toggleBtn.type = "button";
+          toggleBtn.className = "thinking-toggle-btn";
+          toggleBtn.innerHTML = `<span class="thinking-toggle-arrow">\u25B6</span> Reasoning`;
+          thinkingBlock.appendChild(toggleBtn);
+          const thinkingContent = document.createElement("div");
+          thinkingContent.className = "thinking-content";
+          thinkingContent.textContent = thinking;
+          thinkingBlock.appendChild(thinkingContent);
+          toggleBtn.addEventListener("click", () => {
+            const isOpen = thinkingContent.classList.toggle("visible");
+            const arrow = toggleBtn.querySelector(".thinking-toggle-arrow");
+            if (arrow) {
+              arrow.textContent = isOpen ? "\u25BC" : "\u25B6";
+            }
+          });
+          wrapper.insertBefore(thinkingBlock, bubble);
+        }
+        bubble.className = "bubble md";
+        bubble.innerHTML = renderMarkdown(visible || "*(no response)*");
+        enhanceCodeBlocks(bubble);
+      };
+      if (pendingAssistantBubble && pendingAssistantWrapper) {
+        finalize(pendingAssistantBubble, pendingAssistantWrapper);
         pendingAssistantBubble = null;
         pendingAssistantWrapper = null;
       } else {
-        const { bubble } = createMessage("assistant", "");
-        bubble.className = "bubble md";
-        bubble.innerHTML = renderMarkdown(text2);
-        enhanceCodeBlocks(bubble);
+        const { bubble, wrapper } = createMessage("assistant", "");
+        finalize(bubble, wrapper);
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
       promptEl.focus();
@@ -2772,6 +3008,71 @@ Please report this to https://github.com/markedjs/marked.`, e) {
         };
       }) : [];
       renderAttachmentRow();
+    }
+    if (message?.type === "workspaceTree") {
+      const tree = String(message.tree ?? "");
+      const { bubble } = createMessage("assistant", "");
+      bubble.className = "bubble md";
+      bubble.innerHTML = renderMarkdown("```\n" + tree + "\n```");
+      enhanceCodeBlocks(bubble);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      updateEmptyState();
+      return;
+    }
+    if (message?.type === "gitResult") {
+      const output = String(message.output ?? "");
+      const op = String(message.op ?? "");
+      const { bubble } = createMessage("assistant", "");
+      bubble.className = "bubble md";
+      bubble.innerHTML = renderMarkdown(`**Git ${op}**
+\`\`\`
+${output}
+\`\`\``);
+      enhanceCodeBlocks(bubble);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      updateEmptyState();
+      return;
+    }
+    if (message?.type === "ollamaState") {
+      const state = String(message.state ?? "");
+      if (state === "not-running") {
+        setStatus("Ollama not running");
+        statusPillEl.classList.add("error");
+      } else if (state === "not-installed") {
+        setStatus("Ollama not installed");
+        statusPillEl.classList.add("error");
+      } else if (state === "running") {
+        const ver = message.version ? ` v${String(message.version)}` : "";
+        setStatus(`Idle \u2014 Ollama${ver}`);
+        statusPillEl.classList.remove("error");
+      }
+      return;
+    }
+    if (message?.type === "browserSelection") {
+      const text2 = String(message.text ?? "");
+      const url = String(message.url ?? "");
+      const tag = message.elementTag ? ` <${String(message.elementTag)}>` : "";
+      const { bubble } = createMessage("assistant", "");
+      bubble.className = "bubble md";
+      bubble.innerHTML = renderMarkdown(
+        `**\u{1F4CE} Web selection from** \`${url}\`${tag}
+
+> ${text2.replace(/\n/g, "\n> ")}`
+      );
+      enhanceCodeBlocks(bubble);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      updateEmptyState();
+      if (!promptEl.value) {
+        try {
+          const hostname = new URL(url).hostname;
+          promptEl.value = `About this from ${hostname}: `;
+        } catch {
+          promptEl.value = "About this: ";
+        }
+        promptEl.focus();
+        promptEl.setSelectionRange(promptEl.value.length, promptEl.value.length);
+      }
+      return;
     }
   });
   syncModeUi();

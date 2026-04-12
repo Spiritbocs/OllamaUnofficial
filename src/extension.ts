@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import { execFile } from 'child_process';
+import * as fs from 'fs';
+import * as nodePath from 'path';
 import {
   loadSessions,
   randomId,
@@ -10,12 +13,15 @@ import {
 import { streamOllamaChat } from './llm/ollamaStream';
 import { openAiNonStream, streamOpenAiCompatibleChat } from './llm/openaiSseStream';
 import { SECRET_HUGGINGFACE, SECRET_OPENROUTER } from './secrets';
+import { BrowserPanel } from './browserPanel';
 
 type ChatMessage = PersistedMessage;
 
 type ChatMode = 'agent' | 'ask' | 'plan';
 
 type ProviderId = 'ollama' | 'openrouter' | 'huggingface';
+
+type FileAccessLevel = 'none' | 'read' | 'readwrite';
 
 type Attachment = {
   id: string;
@@ -37,6 +43,10 @@ type WebviewInboundMessage =
       maxTokens?: number;
       topP?: number;
       openRouterFreeOnly?: boolean;
+      fileAccess?: string;
+      fileScope?: string;
+      terminalAccess?: boolean;
+      gitAccess?: boolean;
     }
   | { type: 'setModel'; model: string }
   | { type: 'setProvider'; provider: ProviderId }
@@ -49,7 +59,17 @@ type WebviewInboundMessage =
   | { type: 'pickWorkspaceFile' }
   | { type: 'attachProblems' }
   | { type: 'attachClipboardImage' }
-  | { type: 'stub'; feature: string };
+  | { type: 'pickLocalFile' }
+  | { type: 'openBrowser' }
+  | { type: 'stub'; feature: string }
+  | { type: 'applyFileEdit'; code: string; language: string; suggestedPath?: string }
+  | { type: 'openFile'; path: string }
+  | { type: 'runInTerminal'; command: string }
+  | { type: 'getWorkspaceTree' }
+  | { type: 'gitStatus' }
+  | { type: 'gitDiff'; filePath?: string }
+  | { type: 'gitCommit'; message: string }
+  | { type: 'gitPush' };
 
 type OllamaTagsResponse = {
   models?: Array<{
@@ -81,6 +101,7 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
   private sessions: ChatSession[] = [];
   private activeSessionId = '';
   private readonly log: vscode.OutputChannel;
+  private ollamaTerminal?: vscode.Terminal;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.log = vscode.window.createOutputChannel('OllamaUnofficial');
@@ -274,6 +295,10 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
       maxTokens: c.get<number>('maxTokens') ?? 4096,
       topP: c.get<number>('topP') ?? 1,
       openRouterFreeOnly: c.get<boolean>('openRouterFreeOnly') ?? true,
+      fileAccess: c.get<string>('fileAccess') ?? 'none',
+      fileScope: c.get<string>('fileScope') ?? 'workspace',
+      terminalAccess: c.get<boolean>('terminalAccess') ?? false,
+      gitAccess: c.get<boolean>('gitAccess') ?? false,
     });
   }
 
@@ -320,6 +345,14 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
         message.openRouterFreeOnly,
         vscode.ConfigurationTarget.Global
       );
+    }
+
+    if (typeof message.terminalAccess === 'boolean') {
+      await config.update('terminalAccess', message.terminalAccess, vscode.ConfigurationTarget.Global);
+    }
+
+    if (typeof message.gitAccess === 'boolean') {
+      await config.update('gitAccess', message.gitAccess, vscode.ConfigurationTarget.Global);
     }
 
     await this.refreshModelList();
@@ -455,6 +488,58 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
       void vscode.window.showInformationMessage(
         'Image from clipboard is not supported in this version.'
       );
+      return;
+    }
+
+    if (message.type === 'pickLocalFile') {
+      await this.handlePickLocalFile();
+      return;
+    }
+
+    if (message.type === 'openBrowser') {
+      BrowserPanel.createOrShow(this.context, (msg) => {
+        this.postMessagePublic(msg as Record<string, unknown>);
+      });
+      return;
+    }
+
+    if (message.type === 'applyFileEdit') {
+      await this.handleApplyFileEdit(message.code, message.language, message.suggestedPath);
+      return;
+    }
+
+    if (message.type === 'openFile') {
+      await this.handleOpenFile(message.path);
+      return;
+    }
+
+    if (message.type === 'runInTerminal') {
+      this.handleRunInTerminal(message.command);
+      return;
+    }
+
+    if (message.type === 'getWorkspaceTree') {
+      await this.handleGetWorkspaceTree();
+      return;
+    }
+
+    if (message.type === 'gitStatus') {
+      await this.handleGitStatus();
+      return;
+    }
+
+    if (message.type === 'gitDiff') {
+      await this.handleGitDiff(message.filePath);
+      return;
+    }
+
+    if (message.type === 'gitCommit') {
+      await this.handleGitCommit(message.message);
+      return;
+    }
+
+    if (message.type === 'gitPush') {
+      await this.handleGitPush();
       return;
     }
 
@@ -634,7 +719,7 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
 
       if (!key) {
         throw new Error(
-          'OpenRouter API key missing. Open the ⚙ panel in the chat header (or run “OllamaUnofficial: Set OpenRouter API Key”).'
+          'OpenRouter API key missing. Open the ⚙ panel in the chat header (or run "OllamaUnofficial: Set OpenRouter API Key").'
         );
       }
 
@@ -690,7 +775,7 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
 
     if (!key) {
       throw new Error(
-        'Hugging Face API token missing. Open the ⚙ panel in the chat header (or run “OllamaUnofficial: Set Hugging Face API Token”).'
+        'Hugging Face API token missing. Open the ⚙ panel in the chat header (or run "OllamaUnofficial: Set Hugging Face API Token").'
       );
     }
 
@@ -761,6 +846,9 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
 
   private buildSystemPrompt(mode: ChatMode, provider: ProviderId): string {
     const workspaceContext = this.getWorkspaceContext();
+    const fileAccess = this.getFileAccess();
+    const terminalAccess = this.getTerminalAccess();
+    const gitAccess = this.getGitAccess();
     const approvalMode = this.getApprovalMode();
 
     const modeLine =
@@ -781,8 +869,23 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
       provider === 'ollama'
         ? 'Inference provider: local Ollama.'
         : provider === 'openrouter'
-          ? 'Inference provider: OpenRouter (cloud). Respect the user’s privacy; do not invent credentials.'
+          ? 'Inference provider: OpenRouter (cloud). Respect the user privacy; do not invent credentials.'
           : 'Inference provider: Hugging Face Inference (cloud).';
+
+    const fileAccessLine =
+      fileAccess === 'readwrite'
+        ? 'File access: READ + WRITE. When proposing code for a specific file, start code block with: // File: path/to/file.ext'
+        : fileAccess === 'read'
+          ? 'File access: READ ONLY. You can see files the user attaches.'
+          : 'File access: NONE. Work from what the user pastes.';
+
+    const terminalLine = terminalAccess
+      ? 'Terminal: ENABLED. Propose shell commands in bash blocks.'
+      : 'Terminal: DISABLED.';
+
+    const gitLine = gitAccess
+      ? 'Git: ENABLED. You may suggest git operations (status, diff, commit, push).'
+      : 'Git: DISABLED.';
 
     return [
       'You are OllamaUnofficial, a coding assistant inside VS Code.',
@@ -790,8 +893,11 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
       'Be accurate, concise, and practical.',
       modeLine,
       approvalLine,
+      fileAccessLine,
+      terminalLine,
+      gitLine,
       workspaceContext
-        ? `Workspace folders:\n${workspaceContext}`
+        ? 'Workspace folders:\n' + workspaceContext
         : 'No workspace folders are open.',
     ].join('\n\n');
   }
@@ -996,7 +1102,7 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     return folders
-      .map((folder, index) => `${index + 1}. ${folder.name} — ${folder.uri.fsPath}`)
+      .map((folder, index) => `${index + 1}. ${folder.name}  -  ${folder.uri.fsPath}`)
       .join('\n');
   }
 
@@ -1007,6 +1113,10 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
 
   private postMessage(message: Record<string, unknown>): void {
     this.webviewView?.webview.postMessage(message);
+  }
+
+  public postMessagePublic(msg: Record<string, unknown>): void {
+    this.postMessage(msg);
   }
 
   private postAttachments(): void {
@@ -1106,6 +1216,32 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
     this.addAttachment(label || uri.fsPath, text);
   }
 
+  private async handlePickLocalFile(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      openLabel: 'Attach to Chat',
+      filters: {
+        'All supported': ['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'cs', 'rb', 'php', 'swift', 'kt', 'md', 'txt', 'json', 'yaml', 'yml', 'toml', 'xml', 'html', 'css', 'scss', 'sql', 'sh', 'bash', 'ps1', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'],
+        'Images': ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'],
+        'All files': ['*'],
+      },
+    });
+    if (!picked?.[0]) return;
+    const uri = picked[0];
+    const ext = uri.fsPath.split('.').pop()?.toLowerCase() ?? '';
+    const imageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg']);
+    const label = uri.fsPath.split(/[/\\]/).pop() ?? uri.fsPath;
+    if (imageExts.has(ext)) {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      const mime = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
+      const b64 = Buffer.from(bytes).toString('base64');
+      this.addAttachment(`[img] ${label}`, `[Image: ${label}]\ndata:${mime};base64,${b64.substring(0, 200)}… (${bytes.byteLength} bytes)`);
+    } else {
+      const text = await this.readUriText(uri);
+      this.addAttachment(label, text);
+    }
+  }
+
   private async attachActiveProblems(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
 
@@ -1130,11 +1266,316 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
           : d.severity === vscode.DiagnosticSeverity.Warning
             ? 'warning'
             : 'info';
-      return `${sev} ${line}:${col} — ${d.message}`;
+      return `${sev} ${line}:${col}  -  ${d.message}`;
     });
 
     const label = `${vscode.workspace.asRelativePath(editor.document.uri, false)} (problems)`;
     this.addAttachment(label, lines.join('\n'));
+  }
+
+  // ─── Ollama health-check ────────────────────────────────────────────────────
+
+  private async checkOllamaStatus(): Promise<void> {
+    if (this.getProvider() !== 'ollama') return;
+    const baseUrl = this.getConfig('baseUrl', 'http://127.0.0.1:11434');
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/version`, {
+        signal: AbortSignal.timeout(4000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { version?: string };
+        const ver = data.version ?? '';
+        this.log.appendLine(`[ollama] running v${ver}`);
+        this.postMessage({ type: 'ollamaState', state: 'running', version: ver });
+        void this.checkOllamaForUpdates(ver);
+        return;
+      }
+    } catch { /* not reachable */ }
+
+    const installed = await this.isOllamaInstalled();
+    if (installed) {
+      this.postMessage({ type: 'ollamaState', state: 'not-running' });
+      const choice = await vscode.window.showWarningMessage(
+        'OllamaUnofficial: Ollama is installed but not running.',
+        'Start Ollama', 'Dismiss'
+      );
+      if (choice === 'Start Ollama') this.startOllamaProcess();
+    } else {
+      this.postMessage({ type: 'ollamaState', state: 'not-installed' });
+      const choice = await vscode.window.showWarningMessage(
+        'OllamaUnofficial: Ollama is not installed. It is required for local AI models.',
+        'Download Ollama', 'Use Cloud Instead', 'Dismiss'
+      );
+      if (choice === 'Download Ollama') {
+        void vscode.env.openExternal(vscode.Uri.parse('https://ollama.com/download'));
+      } else if (choice === 'Use Cloud Instead') {
+        await this.setProvider('openrouter');
+      }
+    }
+  }
+
+  private async isOllamaInstalled(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const cmd = process.platform === 'win32' ? 'where' : 'which';
+      execFile(cmd, ['ollama'], (err) => {
+        if (!err) { resolve(true); return; }
+        const paths = process.platform === 'win32'
+          ? [`${process.env.LOCALAPPDATA ?? ''}\\Programs\\Ollama\\ollama.exe`]
+          : process.platform === 'darwin'
+            ? ['/Applications/Ollama.app/Contents/MacOS/ollama', '/usr/local/bin/ollama']
+            : ['/usr/local/bin/ollama', '/usr/bin/ollama'];
+        const checks = paths.map(
+          (p) => new Promise<boolean>((res) => fs.access(p, fs.constants.F_OK, (e) => res(!e)))
+        );
+        void Promise.all(checks).then((results) => resolve(results.some(Boolean)));
+      });
+    });
+  }
+
+  private startOllamaProcess(): void {
+    if (process.platform === 'darwin') {
+      execFile('open', ['-a', 'Ollama']);
+    } else if (process.platform === 'win32') {
+      const exe = `${process.env.LOCALAPPDATA ?? ''}\\Programs\\Ollama\\ollama app.exe`;
+      execFile(exe, [], (err) => { if (err) execFile('ollama', ['serve']); });
+    } else {
+      const term = vscode.window.createTerminal({ name: 'Ollama Server' });
+      term.sendText('ollama serve');
+      term.show();
+    }
+    setTimeout(() => { void this.checkOllamaStatus(); }, 5000);
+  }
+
+  private async checkOllamaForUpdates(currentVersion: string): Promise<void> {
+    try {
+      const res = await fetch('https://api.github.com/repos/ollama/ollama/releases/latest', {
+        headers: { 'User-Agent': 'OllamaUnofficial-VSCode' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { tag_name?: string };
+      const latest = (data.tag_name ?? '').replace(/^v/, '');
+      const current = currentVersion.replace(/^v/, '');
+      if (latest && current && latest !== current) {
+        const choice = await vscode.window.showInformationMessage(
+          `OllamaUnofficial: Ollama update available (v${current} → v${latest}).`,
+          'Download Update', 'Dismiss'
+        );
+        if (choice === 'Download Update') {
+          void vscode.env.openExternal(vscode.Uri.parse('https://ollama.com/download'));
+        }
+      }
+    } catch { /* silently ignore */ }
+  }
+
+  // ─── Permissions ────────────────────────────────────────────────────────────
+
+  private getFileAccess(): FileAccessLevel {
+    const raw = vscode.workspace.getConfiguration('ollamaCoderChat').get<string>('fileAccess');
+    return raw === 'read' || raw === 'readwrite' ? raw : 'none';
+  }
+
+  private getTerminalAccess(): boolean {
+    return vscode.workspace.getConfiguration('ollamaCoderChat').get<boolean>('terminalAccess') ?? false;
+  }
+
+  private getGitAccess(): boolean {
+    return vscode.workspace.getConfiguration('ollamaCoderChat').get<boolean>('gitAccess') ?? false;
+  }
+
+  // File operations
+
+  private async handleOpenFile(filePath: string): Promise<void> {
+    if (this.getFileAccess() === 'none') {
+      void vscode.window.showWarningMessage('OllamaUnofficial: Enable file access in the settings first.');
+      return;
+    }
+    const ws = vscode.workspace.workspaceFolders?.[0];
+    const uri = nodePath.isAbsolute(filePath)
+      ? vscode.Uri.file(filePath)
+      : ws ? vscode.Uri.joinPath(ws.uri, filePath) : undefined;
+    if (!uri) { void vscode.window.showWarningMessage(`Cannot resolve: ${filePath}`); return; }
+    try {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(doc, { preview: false });
+    } catch {
+      void vscode.window.showWarningMessage(`OllamaUnofficial: File not found: ${filePath}`);
+    }
+  }
+
+  private async handleApplyFileEdit(code: string, _language: string, suggestedPath?: string): Promise<void> {
+    if (this.getFileAccess() !== 'readwrite') {
+      void vscode.window.showWarningMessage(
+        'OllamaUnofficial: Enable "Read & Write" file access in the ⚙ settings panel first.'
+      );
+      return;
+    }
+
+    let targetUri: vscode.Uri | undefined;
+    if (suggestedPath) {
+      const ws = vscode.workspace.workspaceFolders?.[0];
+      if (ws) targetUri = vscode.Uri.joinPath(ws.uri, suggestedPath);
+    }
+
+    if (!targetUri) {
+      const picked = await vscode.window.showSaveDialog({
+        defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+        saveLabel: 'Apply to this file',
+      });
+      if (!picked) return;
+      targetUri = picked;
+    }
+
+    // Confirm before overwriting an existing file
+    try {
+      await vscode.workspace.fs.readFile(targetUri);
+      const rel = vscode.workspace.asRelativePath(targetUri);
+      const choice = await vscode.window.showInformationMessage(
+        `Apply AI-proposed changes to ${rel}? This will overwrite its current contents.`,
+        'Apply', 'Cancel'
+      );
+      if (choice !== 'Apply') return;
+    } catch { /* file does not exist yet — create it */ }
+
+    await vscode.workspace.fs.writeFile(targetUri, new TextEncoder().encode(code));
+    const doc = await vscode.workspace.openTextDocument(targetUri);
+    await vscode.window.showTextDocument(doc, { preview: false });
+    void vscode.window.showInformationMessage(
+      `OllamaUnofficial: Applied → ${vscode.workspace.asRelativePath(targetUri)}`
+    );
+  }
+
+  private async handleGetWorkspaceTree(): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) {
+      this.postMessage({ type: 'workspaceTree', tree: 'No workspace folder open.' } as any);
+      return;
+    }
+    const lines: string[] = [];
+    for (const folder of folders) {
+      lines.push(`Folder: ${folder.name}/`);
+      try { await this.appendDirTree(folder.uri, '', lines, 0, 3); } catch { /* ignore */ }
+    }
+    this.postMessage({ type: 'workspaceTree', tree: lines.join('\n') } as any);
+  }
+
+  private async appendDirTree(uri: vscode.Uri, prefix: string, lines: string[], depth: number, maxDepth: number): Promise<void> {
+    if (depth >= maxDepth) return;
+    const IGNORE = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '__pycache__', '.vscode', 'coverage', '.cache']);
+    let entries: [string, vscode.FileType][];
+    try { entries = await vscode.workspace.fs.readDirectory(uri); } catch { return; }
+    entries.sort(([an, at], [bn, bt]) => {
+      const ad = at === vscode.FileType.Directory ? 0 : 1;
+      const bd = bt === vscode.FileType.Directory ? 0 : 1;
+      return ad !== bd ? ad - bd : an.localeCompare(bn);
+    });
+    const visible = entries.filter(([n]) => !IGNORE.has(n) && !n.startsWith('.'));
+    for (let i = 0; i < visible.length; i++) {
+      const [name, type] = visible[i];
+      const isLast = i === visible.length - 1;
+      const branch = isLast ? 'L-- ' : '+-- ';
+      const childPfx = isLast ? '    ' : '|   ';
+      if (type === vscode.FileType.Directory) {
+        lines.push(`${prefix}${branch}${name}/`);
+        await this.appendDirTree(vscode.Uri.joinPath(uri, name), prefix + childPfx, lines, depth + 1, maxDepth);
+      } else {
+        lines.push(`${prefix}${branch}${name}`);
+      }
+    }
+  }
+
+  // Terminal operations
+
+  private handleRunInTerminal(command: string): void {
+    if (!this.getTerminalAccess()) {
+      void vscode.window.showWarningMessage('OllamaUnofficial: Enable terminal access in the settings first.');
+      return;
+    }
+    if (!this.ollamaTerminal || this.ollamaTerminal.exitStatus !== undefined) {
+      this.ollamaTerminal = vscode.window.createTerminal({ name: 'OllamaUnofficial' });
+    }
+    this.ollamaTerminal.show();
+    this.ollamaTerminal.sendText(command);
+  }
+
+  // Git operations
+
+  private async handleGitStatus(): Promise<void> {
+    if (!this.getGitAccess()) {
+      void vscode.window.showWarningMessage('OllamaUnofficial: Enable git access in the settings first.');
+      return;
+    }
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (!gitExt) { this.postMessage({ type: 'gitResult', op: 'status', output: 'Git extension not available.' } as any); return; }
+      if (!gitExt.isActive) await gitExt.activate();
+      const api = (gitExt.exports as any).getAPI(1);
+      const repo = api.repositories[0];
+      if (!repo) { this.postMessage({ type: 'gitResult', op: 'status', output: 'No git repository found.' } as any); return; }
+      const changes = repo.state.workingTreeChanges;
+      if (!changes.length) { this.postMessage({ type: 'gitResult', op: 'status', output: 'Working tree clean.' } as any); return; }
+      const statusMap: Record<number, string> = { 0: ' M', 1: ' A', 2: ' D', 5: 'MM', 6: '??' };
+      const lines = changes.map((c: any) => `${statusMap[c.status] ?? ' M'}  ${vscode.workspace.asRelativePath(c.uri)}`);
+      this.postMessage({ type: 'gitResult', op: 'status', output: `Changes:\n${lines.join('\n')}` } as any);
+    } catch (err) {
+      this.postMessage({ type: 'gitResult', op: 'status', output: `Error: ${err instanceof Error ? err.message : String(err)}` } as any);
+    }
+  }
+
+  private async handleGitDiff(filePath?: string): Promise<void> {
+    if (!this.getGitAccess()) {
+      void vscode.window.showWarningMessage('OllamaUnofficial: Enable git access in the settings first.');
+      return;
+    }
+    if (filePath) {
+      const ws = vscode.workspace.workspaceFolders?.[0];
+      if (ws) {
+        const uri = vscode.Uri.joinPath(ws.uri, filePath);
+        await vscode.commands.executeCommand('git.openChange', uri);
+      }
+    } else {
+      await vscode.commands.executeCommand('workbench.view.scm');
+    }
+  }
+
+  private async handleGitCommit(commitMessage: string): Promise<void> {
+    if (!this.getGitAccess()) {
+      void vscode.window.showWarningMessage('OllamaUnofficial: Enable git access in the settings first.');
+      return;
+    }
+    const choice = await vscode.window.showInformationMessage(
+      `Commit with message: '${commitMessage}'?`,
+      'Commit', 'Cancel'
+    );
+    if (choice !== 'Commit') return;
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (!gitExt) return;
+      if (!gitExt.isActive) await gitExt.activate();
+      const api = (gitExt.exports as any).getAPI(1);
+      const repo = api.repositories[0];
+      if (!repo) { void vscode.window.showWarningMessage('No git repository found.'); return; }
+      await repo.commit(commitMessage, { all: false });
+      void vscode.window.showInformationMessage(`Committed: '${commitMessage}'`);
+      this.postMessage({ type: 'gitResult', op: 'commit', output: `Committed: '${commitMessage}'` } as any);
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Commit failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async handleGitPush(): Promise<void> {
+    if (!this.getGitAccess()) {
+      void vscode.window.showWarningMessage('OllamaUnofficial: Enable git access in the settings first.');
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage('Push current branch to remote?', { modal: true }, 'Push', 'Cancel');
+    if (choice !== 'Push') return;
+    try {
+      await vscode.commands.executeCommand('git.push');
+      this.postMessage({ type: 'gitResult', op: 'push', output: 'Pushed to remote successfully.' } as any);
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Push failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -1159,157 +1600,181 @@ class OllamaCoderChatViewProvider implements vscode.WebviewViewProvider {
     ].join('; ');
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang='en'>
 <head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="${csp}" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset='UTF-8' />
+  <meta http-equiv='Content-Security-Policy' content='${csp}' />
+  <meta name='viewport' content='width=device-width, initial-scale=1.0' />
   <title>OllamaUnofficial</title>
-  <link rel="stylesheet" href="${styleUri}" />
+  <link rel='stylesheet' href='${styleUri}' />
 </head>
 <body>
-  <div class="claude-app">
-    <header class="claude-header">
-      <div class="header-left">
-        <span class="logo-mark" aria-hidden="true"></span>
-        <span class="header-title">OllamaUnofficial</span>
+  <div class='claude-app'>
+    <header class='claude-header'>
+      <div class='header-left'>
+        <span class='logo-mark' aria-hidden='true'></span>
+        <span class='header-title'>OllamaUnofficial</span>
       </div>
-      <div class="header-right">
-        <select id="providerSelect" class="provider-pill" title="Inference provider">
-          <option value="ollama"${provider === 'ollama' ? ' selected' : ''}>Ollama (local)</option>
-          <option value="openrouter"${provider === 'openrouter' ? ' selected' : ''}>OpenRouter</option>
-          <option value="huggingface"${provider === 'huggingface' ? ' selected' : ''}>Hugging Face</option>
+      <div class='header-right'>
+        <select id='providerSelect' class='provider-pill' title='Inference provider'>
+          <option value='ollama'${provider === 'ollama' ? ' selected' : ''}>Ollama (local)</option>
+          <option value='openrouter'${provider === 'openrouter' ? ' selected' : ''}>OpenRouter</option>
+          <option value='huggingface'${provider === 'huggingface' ? ' selected' : ''}>Hugging Face</option>
         </select>
-        <select id="modelSelect" class="model-pill" title="Model">
-          <option value="${escapeHtml(model)}">${escapeHtml(model)}</option>
+        <select id='modelSelect' class='model-pill' title='Model'>
+          <option value='${escapeHtml(model)}'>${escapeHtml(model)}</option>
         </select>
-        <button type="button" class="icon-only" id="refreshModelsBtn" title="Refresh models">↻</button>
-        <button type="button" class="icon-only" id="settingsBtn" title="Chat settings (keys, temperature…)">⚙</button>
-        <button type="button" class="icon-only" id="newChatBtn" title="New chat tab">+</button>
+        <button type='button' class='icon-only' id='refreshModelsBtn' title='Refresh models'>↻</button>
+        <button type='button' class='icon-only' id='settingsBtn' title='Chat settings (keys, temperature…)'>⚙</button>
+        <button type='button' class='icon-only' id='newChatBtn' title='New chat tab'>+</button>
       </div>
     </header>
 
-    <div class="session-bar" id="sessionBar"></div>
+    <div class='session-bar' id='sessionBar'></div>
 
-    <div class="thread-meta">
-      <div class="status-pill" id="statusPill">
-        <span class="status-dot"></span>
-        <span id="statusText">Idle</span>
+    <div class='thread-meta'>
+      <div class='status-pill' id='statusPill'>
+        <span class='status-dot'></span>
+        <span id='statusText'>Idle</span>
       </div>
-      <span class="hint-mini">Keys: Enter send · Shift+Enter newline</span>
+      <span class='hint-mini'>Keys: Enter send · Shift+Enter newline</span>
     </div>
 
-    <main class="claude-main">
-      <div class="empty" id="emptyState">
-        <div class="empty-inner">
-          <img class="empty-logo" src="${iconUri}" alt="" />
-          <h1>Free & local models</h1>
-          <p>
-            Use <strong>Ollama</strong> locally or <strong>OpenRouter</strong> / <strong>Hugging Face</strong> in the cloud. Click <strong>⚙</strong> in the header for API keys, temperature, and token limits. Pin extra model ids in VS Code settings under <code>ollamaCoderChat.models</code>. Use <strong>+</strong> for a new tab; <strong>✎</strong> on a tab to rename it.
-          </p>
-          <p><span class="kbd">Enter</span> send · <span class="kbd">Shift</span>+<span class="kbd">Enter</span> line</p>
+    <main class='claude-main'>
+      <div class='empty' id='emptyState'>
+        <div class='empty-inner'>
+          <img class='empty-logo' src='${iconUri}' alt='' />
+          <h1>OllamaUnofficial</h1>
+          <p>Free & local AI coding assistant. Use <strong>Ollama</strong> locally or <strong>OpenRouter</strong> / <strong>Hugging Face</strong> in the cloud.</p>
+          <div class='cap-table' style='margin: 12px 0; font-size: 13px; line-height: 1.6;'>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>File Read/Write</span><span id='capFile' style='color:#888;'>Off</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Multi-file Context</span><span style='color:#0a0;'>On</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Inline Editing</span><span id='capEdit' style='color:#888;'>Off</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Code Generation</span><span style='color:#0a0;'>On</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Terminal Access</span><span id='capTerm' style='color:#888;'>Off</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Git Integration</span><span id='capGit' style='color:#888;'>Off</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Chat Context</span><span style='color:#0a0;'>On</span></div>
+            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>File Navigation</span><span id='capNav' style='color:#888;'>Off</span></div>
+          </div>
+          <p style='margin-top:8px;font-size:11px;opacity:0.7;'>Click <strong>⚙</strong> to configure API keys & permissions.</p>
         </div>
       </div>
-      <div class="messages" id="messages"></div>
+      <div class='messages' id='messages' data-drop-zone='true'></div>
     </main>
 
-    <footer class="claude-composer-wrap">
-      <div class="attachment-row hidden" id="attachmentRow"></div>
-      <div class="composer-card">
-        <textarea id="prompt" placeholder="Message…" rows="3"></textarea>
-        <div class="composer-bar">
-          <div class="tools-left">
-            <button type="button" class="tool-btn" id="attachBtn" title="Add context">+ Context</button>
-            <div class="mode-seg" title="Conversation style">
-              <button type="button" id="modeAgent">Agent</button>
-              <button type="button" id="modeAsk">Ask</button>
-              <button type="button" id="modePlan">Plan</button>
+    <footer class='claude-composer-wrap'>
+      <div class='attachment-row hidden' id='attachmentRow'></div>
+      <div class='composer-card'>
+        <textarea id='prompt' placeholder='Message…' rows='3'></textarea>
+        <div class='composer-bar'>
+          <div class='tools-left'>
+            <button type='button' class='tool-btn' id='attachBtn' title='Add context'>+ Context</button>
+            <button type='button' class='tool-btn' id='browseBtn' title='Browse web and select content'>🌐</button>
+            <div class='mode-seg' title='Conversation style'>
+              <button type='button' id='modeAgent'>Agent</button>
+              <button type='button' id='modeAsk'>Ask</button>
+              <button type='button' id='modePlan'>Plan</button>
             </div>
-            <div class="menu" id="attachMenu">
-              <div class="menu-search">
-                <input id="attachSearch" type="text" placeholder="Filter…" />
+            <div class='menu' id='attachMenu'>
+              <div class='menu-search'>
+                <input id='attachSearch' type='text' placeholder='Filter…' />
               </div>
-              <div class="menu-list">
-                <button type="button" class="menu-item" data-action="activeFile" data-filter="active file editor tab">
+              <div class='menu-list'>
+                <button type='button' class='menu-item' data-action='activeFile' data-filter='active file editor tab'>
                   Active file
                 </button>
-                <button type="button" class="menu-item" data-action="openEditors" data-filter="open editors tabs">
+                <button type='button' class='menu-item' data-action='openEditors' data-filter='open editors tabs'>
                   Open editors…
                 </button>
-                <button type="button" class="menu-item" data-action="workspaceFile" data-filter="files folders workspace disk">
+                <button type='button' class='menu-item' data-action='workspaceFile' data-filter='files folders workspace disk'>
                   File from disk…
                 </button>
-                <button type="button" class="menu-item" data-action="problems" data-filter="problems diagnostics errors warnings">
+                <button type='button' class='menu-item' data-action='localFile' data-filter='upload file local computer drag drop'>
+                  Upload file…
+                </button>
+                <button type='button' class='menu-item' data-action='problems' data-filter='problems diagnostics errors warnings'>
                   Problems (active file)
                 </button>
-                <button type="button" class="menu-item" data-action="clipboardImage" data-filter="image clipboard picture">
+                <button type='button' class='menu-item' data-action='clipboardImage' data-filter='image clipboard picture'>
                   Image from clipboard
                 </button>
-                <div class="menu-divider"></div>
-                <div class="menu-section">More</div>
-                <button type="button" class="menu-item" data-action="instructions" data-filter="instructions rules">
+                <div class='menu-divider'></div>
+                <div class='menu-section'>More</div>
+                <button type='button' class='menu-item' data-action='instructions' data-filter='instructions rules'>
                   Instructions…
                 </button>
-                <button type="button" class="menu-item" data-action="symbols" data-filter="symbols outline">
+                <button type='button' class='menu-item' data-action='symbols' data-filter='symbols outline'>
                   Symbols…
                 </button>
               </div>
             </div>
           </div>
-          <div class="tools-right">
-            <button type="button" class="tool-btn primary-send" id="sendBtn" title="Send">↑</button>
+          <div class='tools-right'>
+            <button type='button' class='tool-btn primary-send' id='sendBtn' title='Send'>↑</button>
           </div>
         </div>
       </div>
-      <div class="composer-footer-hint">
+      <div class='composer-footer-hint'>
         <span>⚙ Header for keys &amp; sampling</span>
-        <span class="hint-muted">Palette commands still work</span>
+        <span class='hint-muted'>Palette commands still work</span>
       </div>
     </footer>
 
-    <div id="settingsOverlay" class="settings-overlay hidden" aria-hidden="true">
-      <div class="settings-panel" id="settingsPanelInner" role="dialog" aria-labelledby="settingsTitle">
-        <div class="settings-header">
-          <span id="settingsTitle" class="settings-title">Chat settings</span>
-          <button type="button" class="icon-only settings-close" id="settingsCloseBtn" title="Close">×</button>
+    <div id='settingsOverlay' class='settings-overlay hidden' aria-hidden='true'>
+      <div class='settings-panel' id='settingsPanelInner' role='dialog' aria-labelledby='settingsTitle'>
+        <div class='settings-header'>
+          <span id='settingsTitle' class='settings-title'>Chat settings</span>
+          <button type='button' class='icon-only settings-close' id='settingsCloseBtn' title='Close'>×</button>
         </div>
-        <div class="settings-body">
-          <label class="settings-label">OpenRouter API key <span class="settings-hint" id="orKeyHint"></span></label>
-          <input type="password" class="settings-input" id="inputOpenRouterKey" autocomplete="off" placeholder="sk-or-…" />
+        <div class='settings-body'>
+          <label class='settings-label'>OpenRouter API key <span class='settings-hint' id='orKeyHint'></span></label>
+          <input type='password' class='settings-input' id='inputOpenRouterKey' autocomplete='off' placeholder='sk-or-…' />
 
-          <label class="settings-label">Hugging Face token <span class="settings-hint" id="hfKeyHint"></span></label>
-          <input type="password" class="settings-input" id="inputHfKey" autocomplete="off" placeholder="hf_…" />
+          <label class='settings-label'>Hugging Face token <span class='settings-hint' id='hfKeyHint'></span></label>
+          <input type='password' class='settings-input' id='inputHfKey' autocomplete='off' placeholder='hf_…' />
 
-          <div class="settings-row">
-            <div class="settings-field">
-              <label class="settings-label" for="inputTemperature">Temperature</label>
-              <input type="number" class="settings-input" id="inputTemperature" min="0" max="2" step="0.05" />
+          <div class='settings-row'>
+            <div class='settings-field'>
+              <label class='settings-label' for='inputTemperature'>Temperature</label>
+              <input type='number' class='settings-input' id='inputTemperature' min='0' max='2' step='0.05' />
             </div>
-            <div class="settings-field">
-              <label class="settings-label" for="inputMaxTokens">Max tokens</label>
-              <input type="number" class="settings-input" id="inputMaxTokens" min="1" max="128000" step="1" />
+            <div class='settings-field'>
+              <label class='settings-label' for='inputMaxTokens'>Max tokens</label>
+              <input type='number' class='settings-input' id='inputMaxTokens' min='1' max='128000' step='1' />
             </div>
-            <div class="settings-field">
-              <label class="settings-label" for="inputTopP">Top P</label>
-              <input type="number" class="settings-input" id="inputTopP" min="0.01" max="1" step="0.01" />
+            <div class='settings-field'>
+              <label class='settings-label' for='inputTopP'>Top P</label>
+              <input type='number' class='settings-input' id='inputTopP' min='0.01' max='1' step='0.01' />
             </div>
           </div>
 
-          <label class="settings-check">
-            <input type="checkbox" id="chkOpenRouterFreeOnly" />
+          <label class='settings-check'>
+            <input type='checkbox' id='chkOpenRouterFreeOnly' />
             <span>OpenRouter model list: free ($0) only</span>
           </label>
 
-          <p class="settings-footnote">Secrets are stored in VS Code Secret Storage, not settings.json.</p>
+          <div style='border-top:1px solid rgba(255,255,255,0.1);margin:16px 0;padding-top:16px;'>
+            <h3 style='margin:0 0 12px 0;font-size:13px;font-weight:600;opacity:0.9;'>Workspace & Terminal</h3>
+            <label class='settings-check'>
+              <input type='checkbox' id='chkTerminalAccess' />
+              <span>Allow terminal command execution</span>
+            </label>
+            <label class='settings-check'>
+              <input type='checkbox' id='chkGitAccess' />
+              <span>Allow git operations (status, diff, commit, push)</span>
+            </label>
+          </div>
+
+          <p class='settings-footnote'>Secrets are stored in VS Code Secret Storage, not settings.json.</p>
         </div>
-        <div class="settings-actions">
-          <button type="button" class="tool-btn" id="settingsCancelBtn">Cancel</button>
-          <button type="button" class="settings-save-btn" id="settingsSaveBtn">Save</button>
+        <div class='settings-actions'>
+          <button type='button' class='tool-btn' id='settingsCancelBtn'>Cancel</button>
+          <button type='button' class='settings-save-btn' id='settingsSaveBtn'>Save</button>
         </div>
       </div>
     </div>
   </div>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
+  <script nonce='${nonce}' src='${scriptUri}'></script>
 </body>
 </html>`;
   }
@@ -1381,6 +1846,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('ollamaCoderChat.showLog', () => {
       provider.showLog();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('ollamaCoderChat.openBrowser', () => {
+      BrowserPanel.createOrShow(context, (msg) => {
+        provider.postMessagePublic(msg as Record<string, unknown>);
+      });
     })
   );
 }

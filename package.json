@@ -2,11 +2,11 @@
   "name": "ollamaunofficial",
   "displayName": "OllamaUnofficial",
   "description": "Sidebar chat: Ollama (local), OpenRouter, and Hugging Face Inference — free-model friendly with secure API keys.",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "publisher": "Spiritbocs",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.96.0"
+    "vscode": "^1.115.0"
   },
   "categories": [
     "Other",
@@ -56,6 +56,10 @@
       {
         "command": "ollamaCoderChat.showLog",
         "title": "OllamaUnofficial: Show Log"
+      },
+      {
+        "command": "ollamaCoderChat.openBrowser",
+        "title": "OllamaUnofficial: Open Browser"
       }
     ],
     "menus": {
@@ -143,6 +147,35 @@
           },
           "default": [],
           "description": "Extra model ids to always show in the picker (merged with provider discovery)."
+        },
+        "ollamaCoderChat.fileAccess": {
+          "type": "string",
+          "enum": [
+            "none",
+            "read",
+            "readwrite"
+          ],
+          "default": "none",
+          "description": "File access level: none (disabled), read (list files and AI can request to read), readwrite (also apply edits to files)."
+        },
+        "ollamaCoderChat.fileScope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "anywhere"
+          ],
+          "default": "workspace",
+          "description": "Where the AI can access files: workspace (only open folders) or anywhere (any file on disk)."
+        },
+        "ollamaCoderChat.terminalAccess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the AI to propose terminal commands that can be run in VS Code's integrated terminal with one click."
+        },
+        "ollamaCoderChat.gitAccess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow git operations: view status, view diffs, commit staged changes, and push to remote."
         }
       }
     }
