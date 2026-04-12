@@ -1457,9 +1457,11 @@ async function installUpdate(downloadUrl, filename, log) {
   }
 }
 function checkForUpdates(context, log) {
+  log.appendLine("[updater] Update check scheduled (8s delay).");
   setTimeout(() => {
     void (async () => {
       try {
+        log.appendLine("[updater] Starting update check\u2026");
         const ext = vscode2.extensions.getExtension("Spiritbocs.ollamaunofficial") ?? vscode2.extensions.getExtension("undefined_publisher.ollamaunofficial");
         const currentVersion = ext?.packageJSON?.["version"] ?? "0.0.0";
         log.appendLine(`[updater] Current version: ${currentVersion}`);
@@ -2890,23 +2892,24 @@ ${lines.join("\n")}` });
       <span class='hint-mini'>Keys: Enter send \xB7 Shift+Enter newline</span>
     </div>
 
+    <div id='mainView' class='main-view'>
     <main class='claude-main'>
       <div class='empty' id='emptyState'>
         <div class='empty-inner'>
           <img class='empty-logo' src='${iconUri}' alt='' />
-          <h1>OllamaUnofficial</h1>
-          <p>Free & local AI coding assistant. Use <strong>Ollama</strong> locally or <strong>OpenRouter</strong> / <strong>Hugging Face</strong> in the cloud.</p>
-          <div class='cap-table' style='margin: 12px 0; font-size: 13px; line-height: 1.6;'>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>File Read/Write</span><span id='capFile' style='color:#888;'>Off</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Multi-file Context</span><span style='color:#0a0;'>On</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Inline Editing</span><span id='capEdit' style='color:#888;'>Off</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Code Generation</span><span style='color:#0a0;'>On</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Terminal Access</span><span id='capTerm' style='color:#888;'>Off</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Git Integration</span><span id='capGit' style='color:#888;'>Off</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>Chat Context</span><span style='color:#0a0;'>On</span></div>
-            <div style='display:flex;justify-content:space-between;padding:4px 0;'><span>File Navigation</span><span id='capNav' style='color:#888;'>Off</span></div>
-          </div>
-          <p style='margin-top:8px;font-size:11px;opacity:0.7;'>Click <strong>\u2699</strong> to configure API keys & permissions.</p>
+          <h1 class='empty-title'>OllamaUnofficial</h1>
+          <p class='empty-sub'>Free AI coding assistant \u2014 use <strong>Ollama</strong> locally or <strong>OpenRouter</strong> / <strong>Hugging Face</strong> in the cloud.</p>
+          <table class='cap-table'>
+            <tr><td>File Read/Write</td><td><span class='cap-val' id='capFile'>Off</span></td></tr>
+            <tr><td>Inline Editing</td><td><span class='cap-val' id='capEdit'>Off</span></td></tr>
+            <tr><td>Terminal Access</td><td><span class='cap-val' id='capTerm'>Off</span></td></tr>
+            <tr><td>Git Integration</td><td><span class='cap-val' id='capGit'>Off</span></td></tr>
+            <tr><td>File Navigation</td><td><span class='cap-val' id='capNav'>Off</span></td></tr>
+            <tr><td>Multi-file Context</td><td><span class='cap-val cap-on'>On</span></td></tr>
+            <tr><td>Code Generation</td><td><span class='cap-val cap-on'>On</span></td></tr>
+            <tr><td>Chat Context</td><td><span class='cap-val cap-on'>On</span></td></tr>
+          </table>
+          <p class='empty-hint'>Click <strong>\u2699</strong> to configure API keys &amp; permissions.</p>
         </div>
       </div>
       <div class='messages' id='messages' data-drop-zone='true'></div>
@@ -2969,7 +2972,9 @@ ${lines.join("\n")}` });
         <span class='hint-muted'>Palette commands still work</span>
       </div>
     </footer>
+    </div><!-- /#mainView -->
 
+    <!-- Settings panel replaces main content \u2014 no absolute positioning needed -->
     <div id='settingsOverlay' class='settings-overlay hidden' aria-hidden='true'>
       <div class='settings-panel' id='settingsPanelInner' role='dialog' aria-labelledby='settingsTitle'>
         <div class='settings-header'>

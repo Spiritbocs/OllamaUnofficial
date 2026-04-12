@@ -161,6 +161,7 @@ const modeAgent = getEl<HTMLButtonElement>('modeAgent');
 const modeAsk = getEl<HTMLButtonElement>('modeAsk');
 const modePlan = getEl<HTMLButtonElement>('modePlan');
 const settingsBtn = getEl<HTMLButtonElement>('settingsBtn');
+const mainView = getEl<HTMLElement>('mainView');
 const settingsOverlay = getEl<HTMLElement>('settingsOverlay');
 const settingsCloseBtn = getEl<HTMLButtonElement>('settingsCloseBtn');
 const settingsCancelBtn = getEl<HTMLButtonElement>('settingsCancelBtn');
@@ -298,6 +299,7 @@ function openSettingsPanel(): void {
 function closeSettingsPanel(): void {
   settingsOverlay.classList.add('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'true');
+  mainView.classList.remove('hidden');
 }
 
 function applySettingsForm(message: Record<string, unknown>): void {
@@ -326,6 +328,7 @@ function applySettingsForm(message: Record<string, unknown>): void {
   inputTopP.classList.remove('invalid');
   inputMaxTokens.classList.remove('invalid');
 
+  mainView.classList.add('hidden');
   settingsOverlay.classList.remove('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'false');
 }

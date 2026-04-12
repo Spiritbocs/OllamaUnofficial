@@ -2364,6 +2364,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var modeAsk = getEl("modeAsk");
   var modePlan = getEl("modePlan");
   var settingsBtn = getEl("settingsBtn");
+  var mainView = getEl("mainView");
   var settingsOverlay = getEl("settingsOverlay");
   var settingsCloseBtn = getEl("settingsCloseBtn");
   var settingsCancelBtn = getEl("settingsCancelBtn");
@@ -2484,6 +2485,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   function closeSettingsPanel() {
     settingsOverlay.classList.add("hidden");
     settingsOverlay.setAttribute("aria-hidden", "true");
+    mainView.classList.remove("hidden");
   }
   function applySettingsForm(message) {
     orKeyHint.textContent = message.hasOpenRouterKey ? "(saved)" : "";
@@ -2505,6 +2507,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     inputTemperature.classList.remove("invalid");
     inputTopP.classList.remove("invalid");
     inputMaxTokens.classList.remove("invalid");
+    mainView.classList.add("hidden");
     settingsOverlay.classList.remove("hidden");
     settingsOverlay.setAttribute("aria-hidden", "false");
   }

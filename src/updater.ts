@@ -151,9 +151,11 @@ export function checkForUpdates(
   log: vscode.OutputChannel
 ): void {
   // Delay the check by 8 seconds so it doesn't slow down startup
+  log.appendLine('[updater] Update check scheduled (8s delay).');
   setTimeout(() => {
     void (async () => {
       try {
+        log.appendLine('[updater] Starting update check…');
         // Get the currently installed version from the extension manifest
         const ext =
           vscode.extensions.getExtension('Spiritbocs.ollamaunofficial') ??
