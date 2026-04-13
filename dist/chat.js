@@ -2275,6 +2275,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
       thinking += (thinking ? "\n\n" : "") + inner.trim();
       return "";
     }).trim();
+    const headingMatch = /^### Reasoning\s+([\s\S]*?)\s+### Answer\s+([\s\S]*)$/m.exec(visible);
+    if (headingMatch) {
+      thinking += (thinking ? "\n\n" : "") + headingMatch[1].trim();
+      visible = headingMatch[2].trim();
+    }
     const openIdx = visible.lastIndexOf("<think>");
     if (openIdx !== -1) {
       const tail = visible.slice(openIdx + 7).trim();
@@ -2354,6 +2359,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var refreshModelsBtn = getEl("refreshModelsBtn");
   var modelSelect = getEl("modelSelect");
   var providerSelect = getEl("providerSelect");
+  var historyBtn = getEl("historyBtn");
+  var helpBtn = getEl("helpBtn");
   var sessionBar = getEl("sessionBar");
   var attachBtn = getEl("attachBtn");
   var browseBtn = getElOpt("browseBtn");
@@ -2370,6 +2377,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var settingsCancelBtn = getEl("settingsCancelBtn");
   var settingsSaveBtn = getEl("settingsSaveBtn");
   var settingsSavedToast = getEl("settingsSavedToast");
+  var logoutBtn = getEl("logoutBtn");
   var inputOpenRouterKey = getEl("inputOpenRouterKey");
   var inputHfKey = getEl("inputHfKey");
   var inputTemperature = getEl("inputTemperature");
@@ -2382,9 +2390,19 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var toggleOrKey = getEl("toggleOrKey");
   var toggleHfKey = getEl("toggleHfKey");
   var selectFileAccess = getEl("selectFileAccess");
+  var selectFileScope = getEl("selectFileScope");
+  var selectApprovalMode = getEl("selectApprovalMode");
   var chkTerminalAccess = getEl("chkTerminalAccess");
   var chkGitAccess = getEl("chkGitAccess");
+  var historyOverlay = getEl("historyOverlay");
+  var historyPanelInner = getEl("historyPanelInner");
+  var historyCloseBtn = getEl("historyCloseBtn");
+  var historySearch = getEl("historySearch");
+  var historyList = getEl("historyList");
   settingsPanelInner.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  historyPanelInner.addEventListener("click", (event) => {
     event.stopPropagation();
   });
   var busy = false;
@@ -2395,6 +2413,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   var ignoreModelSelectChange = false;
   var sessions = [];
   var activeSessionId = "";
+  var historyItems = [];
+  var historyRange = "all";
   function setBusy(isBusy) {
     busy = isBusy;
     refreshModelsBtn.toggleAttribute("disabled", isBusy);
@@ -2403,6 +2423,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     sendBtn.toggleAttribute("disabled", isBusy);
     newChatBtn.toggleAttribute("disabled", isBusy);
     settingsBtn.toggleAttribute("disabled", isBusy);
+    historyBtn.toggleAttribute("disabled", isBusy);
   }
   function setStatus(text2) {
     statusTextEl.textContent = text2;
@@ -2480,11 +2501,26 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     }
   }
   function openSettingsPanel() {
+    historyOverlay.classList.add("hidden");
+    historyOverlay.setAttribute("aria-hidden", "true");
     vscode.postMessage({ type: "getSettings" });
   }
   function closeSettingsPanel() {
     settingsOverlay.classList.add("hidden");
     settingsOverlay.setAttribute("aria-hidden", "true");
+    mainView.classList.remove("hidden");
+  }
+  function openHistoryPanel() {
+    closeSettingsPanel();
+    vscode.postMessage({ type: "getHistory" });
+    mainView.classList.add("hidden");
+    historyOverlay.classList.remove("hidden");
+    historyOverlay.setAttribute("aria-hidden", "false");
+    historySearch.focus();
+  }
+  function closeHistoryPanel() {
+    historyOverlay.classList.add("hidden");
+    historyOverlay.setAttribute("aria-hidden", "true");
     mainView.classList.remove("hidden");
   }
   function applySettingsForm(message) {
@@ -2501,6 +2537,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     inputTopP.value = String(message.topP ?? 1);
     chkOpenRouterFreeOnly.checked = Boolean(message.openRouterFreeOnly);
     selectFileAccess.value = String(message.fileAccess ?? "none");
+    selectFileScope.value = String(message.fileScope ?? "workspace");
+    selectApprovalMode.value = String(message.approvalMode ?? "ask");
     chkTerminalAccess.checked = Boolean(message.terminalAccess);
     chkGitAccess.checked = Boolean(message.gitAccess);
     updateCapabilityBadges(String(message.fileAccess ?? "none"), Boolean(message.terminalAccess), Boolean(message.gitAccess));
@@ -2508,8 +2546,75 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     inputTopP.classList.remove("invalid");
     inputMaxTokens.classList.remove("invalid");
     mainView.classList.add("hidden");
+    closeHistoryPanel();
     settingsOverlay.classList.remove("hidden");
     settingsOverlay.setAttribute("aria-hidden", "false");
+  }
+  function formatHistoryDate(value) {
+    const date = new Date(value);
+    return new Intl.DateTimeFormat(void 0, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit"
+    }).format(date);
+  }
+  function isHistoryItemVisible(item) {
+    const query = historySearch.value.trim().toLowerCase();
+    const haystack = `${item.title} ${item.preview}`.toLowerCase();
+    if (query && !haystack.includes(query)) {
+      return false;
+    }
+    if (historyRange === "all") {
+      return true;
+    }
+    const ageMs = Date.now() - item.updatedAt;
+    if (historyRange === "today") {
+      return ageMs <= 24 * 60 * 60 * 1e3;
+    }
+    if (historyRange === "week") {
+      return ageMs <= 7 * 24 * 60 * 60 * 1e3;
+    }
+    return ageMs <= 30 * 24 * 60 * 60 * 1e3;
+  }
+  function renderHistoryList() {
+    historyList.innerHTML = "";
+    const visibleItems = historyItems.filter(isHistoryItemVisible);
+    if (!visibleItems.length) {
+      const empty = document.createElement("div");
+      empty.className = "history-empty";
+      empty.textContent = "No matching sessions yet.";
+      historyList.appendChild(empty);
+      return;
+    }
+    for (const item of visibleItems) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = `history-item${item.id === activeSessionId ? " active" : ""}`;
+      row.addEventListener("click", () => {
+        vscode.postMessage({
+          type: item.archived ? "restoreSession" : "switchSession",
+          id: item.id
+        });
+        closeHistoryPanel();
+      });
+      const top = document.createElement("div");
+      top.className = "history-item-top";
+      const title = document.createElement("span");
+      title.className = "history-item-title";
+      title.textContent = item.title;
+      const meta = document.createElement("span");
+      meta.className = "history-item-meta";
+      meta.textContent = `${formatHistoryDate(item.updatedAt)} \xB7 ${item.messageCount} msg${item.messageCount === 1 ? "" : "s"}${item.archived ? " \xB7 archived" : ""}`;
+      top.appendChild(title);
+      top.appendChild(meta);
+      const preview = document.createElement("div");
+      preview.className = "history-item-preview";
+      preview.textContent = item.preview || "Empty conversation";
+      row.appendChild(top);
+      row.appendChild(preview);
+      historyList.appendChild(row);
+    }
   }
   function renderThread(msgs) {
     messagesEl.innerHTML = "";
@@ -2664,6 +2769,16 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   newChatBtn.addEventListener("click", () => {
     vscode.postMessage({ type: "newSession" });
   });
+  historyBtn.addEventListener("click", () => {
+    if (!historyOverlay.classList.contains("hidden")) {
+      closeHistoryPanel();
+      return;
+    }
+    openHistoryPanel();
+  });
+  helpBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "showWelcome" });
+  });
   settingsBtn.addEventListener("click", () => {
     if (!settingsOverlay.classList.contains("hidden")) {
       closeSettingsPanel();
@@ -2681,6 +2796,35 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     if (event.target === settingsOverlay) {
       closeSettingsPanel();
     }
+  });
+  historyCloseBtn.addEventListener("click", () => {
+    closeHistoryPanel();
+  });
+  historyOverlay.addEventListener("click", (event) => {
+    if (event.target === historyOverlay) {
+      closeHistoryPanel();
+    }
+  });
+  historySearch.addEventListener("input", () => {
+    renderHistoryList();
+  });
+  document.querySelectorAll(".history-filter").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      historyRange = btn.dataset.range ?? "all";
+      document.querySelectorAll(".history-filter").forEach((candidate) => {
+        candidate.classList.toggle("active", candidate === btn);
+      });
+      renderHistoryList();
+    });
+  });
+  selectFileAccess.addEventListener("change", () => {
+    updateCapabilityBadges(selectFileAccess.value, chkTerminalAccess.checked, chkGitAccess.checked);
+  });
+  chkTerminalAccess.addEventListener("change", () => {
+    updateCapabilityBadges(selectFileAccess.value, chkTerminalAccess.checked, chkGitAccess.checked);
+  });
+  chkGitAccess.addEventListener("change", () => {
+    updateCapabilityBadges(selectFileAccess.value, chkTerminalAccess.checked, chkGitAccess.checked);
   });
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -2732,6 +2876,9 @@ Please report this to https://github.com/markedjs/marked.`, e) {
   toggleHfKey.addEventListener("click", () => {
     togglePasswordVisibility(inputHfKey, toggleHfKey);
   });
+  logoutBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "logout" });
+  });
   settingsSaveBtn.addEventListener("click", () => {
     if (!validateSettingsInputs()) {
       return;
@@ -2748,6 +2895,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
       topP: Number.isFinite(topP) ? topP : void 0,
       openRouterFreeOnly: chkOpenRouterFreeOnly.checked,
       fileAccess: selectFileAccess.value,
+      fileScope: selectFileScope.value,
+      approvalMode: selectApprovalMode.value,
       terminalAccess: chkTerminalAccess.checked,
       gitAccess: chkGitAccess.checked
     });
@@ -2778,6 +2927,17 @@ Please report this to https://github.com/markedjs/marked.`, e) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       submitPrompt();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    if (!settingsOverlay.classList.contains("hidden")) {
+      closeSettingsPanel();
+    }
+    if (!historyOverlay.classList.contains("hidden")) {
+      closeHistoryPanel();
     }
   });
   attachBtn.addEventListener("click", (event) => {
@@ -2860,6 +3020,24 @@ Please report this to https://github.com/markedjs/marked.`, e) {
         };
       }) : [];
       renderSessionBar();
+      renderHistoryList();
+      return;
+    }
+    if (message?.type === "historyState") {
+      activeSessionId = String(message.activeSessionId ?? activeSessionId);
+      const raw = message.items;
+      historyItems = Array.isArray(raw) ? raw.map((item) => {
+        const o = item;
+        return {
+          id: String(o.id ?? ""),
+          title: String(o.title ?? "Chat"),
+          preview: String(o.preview ?? ""),
+          updatedAt: Number(o.updatedAt ?? 0),
+          archived: Boolean(o.archived),
+          messageCount: Number(o.messageCount ?? 0)
+        };
+      }) : [];
+      renderHistoryList();
       return;
     }
     if (message?.type === "providerChanged") {
@@ -3082,6 +3260,7 @@ ${output}
   updateEmptyState();
   promptEl.focus();
   vscode.postMessage({ type: "getModels" });
+  vscode.postMessage({ type: "getHistory" });
 })();
 /*! Bundled license information:
 

@@ -1,6 +1,6 @@
-/* Neutral layout — follows VS Code theme tokens (no vendor accent colors). */
+/* Follow the active VS Code theme, with a light OllamaUnofficial orange accent. */
 :root {
-  --oui-accent: var(--vscode-button-background, #0e639c);
+  --oui-accent: color-mix(in srgb, #d97757 72%, var(--vscode-button-background, #0e639c));
   --oui-accent-fg: var(--vscode-button-foreground, #ffffff);
   --oui-accent-muted: color-mix(in srgb, var(--oui-accent) 35%, transparent);
   --oui-radius-lg: 14px;
@@ -45,8 +45,6 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  position: relative; /* needed so the settings overlay (position:absolute) covers only the app */
-  overflow: hidden;
 }
 
 /* Header — minimal like Claude Code */
@@ -413,31 +411,28 @@ body {
   max-width: min(100%, 720px);
   padding: 10px 14px;
   border-radius: var(--oui-radius-lg);
+  border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.22));
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.6;
   word-wrap: break-word;
 }
 
 /* User bubble — pill shape with subtle tint */
 .msg-user .bubble {
   background: color-mix(in srgb, var(--vscode-input-background) 94%, var(--vscode-list-focusOutline) 6%);
-  border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.22));
   border-bottom-right-radius: 5px;
 }
 
-/* Assistant bubble — no background, borderless, clean prose */
+/* Assistant bubble — card style with editor background */
 .msg-assistant .bubble {
-  background: transparent;
-  border: none;
-  padding-left: 0;
-  padding-right: 0;
+  background: var(--vscode-editor-background);
+  border-bottom-left-radius: 5px;
+  box-shadow: var(--oui-shadow);
 }
 
 .msg-assistant.error .bubble {
-  border: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f85149) 45%, transparent);
-  border-radius: var(--oui-radius-md);
+  border-color: color-mix(in srgb, var(--vscode-errorForeground, #f85149) 45%, transparent);
   background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, #5a1d1d) 35%, var(--vscode-editor-background));
-  padding: 10px 14px;
 }
 
 /* "Working on it…" spinner bubble */
@@ -950,15 +945,23 @@ body {
   display: none;
 }
 
-/* Settings panel — occupies the same flex space as .main-view when visible */
+/* Settings overlay */
 .settings-overlay {
-  flex: 1 1 auto;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
   display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 10px;
-  background: var(--vscode-sideBar-background);
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12px 10px 24px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  animation: overlay-in 0.15s ease;
+}
+
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 .settings-overlay.hidden {
@@ -966,12 +969,21 @@ body {
 }
 
 .settings-panel {
-  width: 100%;
+  width: min(100%, 380px);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  margin-top: 8px;
   border-radius: var(--oui-radius-md);
   border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.4));
   background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
   color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
   box-shadow: var(--oui-shadow);
+  animation: panel-in 0.18s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)     scale(1);    }
 }
 
 .settings-header {
@@ -1195,6 +1207,98 @@ body {
   opacity: 1;
 }
 
+.history-panel {
+  width: min(100%, 520px);
+}
+
+.history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.history-filter {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.35));
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.history-filter.active {
+  background: color-mix(in srgb, var(--oui-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--oui-accent) 42%, transparent);
+  color: var(--vscode-foreground);
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 16px;
+  min-height: 220px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: var(--oui-radius-sm);
+  border: 1px solid var(--vscode-widget-border, rgba(127, 127, 127, 0.25));
+  background: color-mix(in srgb, var(--vscode-editor-background) 70%, transparent);
+  color: var(--vscode-foreground);
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-item:hover {
+  border-color: color-mix(in srgb, var(--oui-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--oui-accent) 10%, var(--vscode-editor-background));
+}
+
+.history-item.active {
+  border-color: color-mix(in srgb, var(--oui-accent) 50%, transparent);
+}
+
+.history-item-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.history-item-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.history-item-meta {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.history-item-preview {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.5;
+}
+
+.history-empty {
+  padding: 26px 10px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
 /* Capabilities table (empty state) */
 .cap-table {
   width: 100%;
@@ -1263,4 +1367,30 @@ body {
   margin: 10px 0 0;
   font-size: 11px;
   opacity: 0.65;
+}
+
+@media (max-width: 640px) {
+  .claude-header {
+    flex-wrap: wrap;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .settings-row {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-footer-hint {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .history-item-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }

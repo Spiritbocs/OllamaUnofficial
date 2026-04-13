@@ -2,9 +2,17 @@
   "name": "ollamaunofficial",
   "displayName": "OllamaUnofficial",
   "description": "Sidebar chat: Ollama (local), OpenRouter, and Hugging Face Inference — free-model friendly with secure API keys.",
-  "version": "0.3.3",
+  "version": "0.3.5",
   "publisher": "Spiritbocs",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Spiritbocs/OllamaUnofficial.git"
+  },
+  "homepage": "https://github.com/Spiritbocs/OllamaUnofficial",
+  "bugs": {
+    "url": "https://github.com/Spiritbocs/OllamaUnofficial/issues"
+  },
   "engines": {
     "vscode": "^1.115.0"
   },
@@ -14,7 +22,15 @@
   ],
   "activationEvents": [
     "onView:ollamaCoderChat.sidebar",
-    "onView:ollamaCoderChat.progress"
+    "onView:ollamaCoderChat.progress",
+    "onCommand:ollamaCoderChat.focus",
+    "onCommand:ollamaCoderChat.newChat",
+    "onCommand:ollamaCoderChat.setOpenRouterApiKey",
+    "onCommand:ollamaCoderChat.setHuggingFaceApiToken",
+    "onCommand:ollamaCoderChat.showLog",
+    "onCommand:ollamaCoderChat.openBrowser",
+    "onCommand:ollamaCoderChat.showWelcome",
+    "onCommand:ollamaCoderChat.logout"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -66,6 +82,14 @@
       {
         "command": "ollamaCoderChat.openBrowser",
         "title": "OllamaUnofficial: Open Browser"
+      },
+      {
+        "command": "ollamaCoderChat.showWelcome",
+        "title": "OllamaUnofficial: Welcome and Walkthrough"
+      },
+      {
+        "command": "ollamaCoderChat.logout",
+        "title": "OllamaUnofficial: Logout Cloud Providers"
       }
     ],
     "menus": {

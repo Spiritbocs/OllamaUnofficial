@@ -1,0 +1,11 @@
+.git/**
+.github/**
+.vscode/**
+dist/**/*.map
+node_modules/**
+release/**
+src/**
+esbuild.mjs
+tsconfig.json
+package-lock.json
+CONTRIB.md

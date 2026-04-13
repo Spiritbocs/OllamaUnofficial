@@ -9,6 +9,7 @@ export type ChatSession = {
   id: string;
   title: string;
   updatedAt: number;
+  archived?: boolean;
   messages: PersistedMessage[];
 };
 
@@ -39,6 +40,10 @@ export function loadSessions(globalState: vscode.Memento): {
           (s) => s && typeof s.id === 'string' && Array.isArray(s.messages)
         )
       : [];
+
+    for (const session of sessions) {
+      session.archived = Boolean(session.archived);
+    }
 
     let activeSessionId = globalState.get<string>(ACTIVE_KEY) ?? '';
 

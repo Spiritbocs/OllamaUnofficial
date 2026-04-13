@@ -59,6 +59,9 @@ function loadSessions(globalState) {
     const sessions = raw ? JSON.parse(raw).filter(
       (s) => s && typeof s.id === "string" && Array.isArray(s.messages)
     ) : [];
+    for (const session of sessions) {
+      session.archived = Boolean(session.archived);
+    }
     let activeSessionId = globalState.get(ACTIVE_KEY) ?? "";
     if (!sessions.length) {
       const id = randomId();
@@ -1510,6 +1513,7 @@ var HF_SUGGESTED_MODELS = [
   "HuggingFaceTB/SmolLM2-1.7B-Instruct",
   "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 ];
+var ONBOARDING_KEY = "ollamaCoderChat.onboarding.v1";
 var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
   constructor(context) {
     this.context = context;
@@ -1518,6 +1522,7 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     const loaded = loadSessions(this.context.globalState);
     this.sessions = loaded.sessions;
     this.activeSessionId = loaded.activeSessionId;
+    this.ensureUsableActiveSession();
     this.messages = this.getActiveSession()?.messages.map((m) => ({ ...m })) ?? [];
   }
   static viewType = "ollamaCoderChat.sidebar";
@@ -1543,6 +1548,29 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
   getActiveSession() {
     return this.sessions.find((s) => s.id === this.activeSessionId);
   }
+  getOpenSessions() {
+    return this.sessions.filter((s) => !s.archived);
+  }
+  ensureUsableActiveSession() {
+    const existing = this.getActiveSession();
+    if (existing && !existing.archived) {
+      return;
+    }
+    const fallback = this.getOpenSessions()[0];
+    if (fallback) {
+      this.activeSessionId = fallback.id;
+      return;
+    }
+    const id = randomId();
+    this.sessions.push({
+      id,
+      title: "New chat",
+      updatedAt: Date.now(),
+      archived: false,
+      messages: []
+    });
+    this.activeSessionId = id;
+  }
   flushMessagesToActiveSession() {
     const session = this.getActiveSession();
     if (!session) {
@@ -1556,6 +1584,46 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
   showLog() {
     this.log.show(true);
   }
+  async showWelcome() {
+    const choice = await vscode3.window.showInformationMessage(
+      "OllamaUnofficial is ready. Open the README for a quick walkthrough, jump into chat, or configure cloud keys.",
+      "Open README",
+      "Open Chat",
+      "Configure Keys"
+    );
+    if (choice === "Open README") {
+      const readmeUri = vscode3.Uri.joinPath(this.context.extensionUri, "README.md");
+      const document = await vscode3.workspace.openTextDocument(readmeUri);
+      await vscode3.window.showTextDocument(document, { preview: false });
+      return;
+    }
+    if (choice === "Open Chat") {
+      await vscode3.commands.executeCommand("ollamaCoderChat.sidebar.focus");
+      return;
+    }
+    if (choice === "Configure Keys") {
+      await vscode3.commands.executeCommand("ollamaCoderChat.sidebar.focus");
+      this.postSettingsSnapshot();
+    }
+  }
+  async logoutCloudProviders() {
+    const choice = await vscode3.window.showWarningMessage(
+      "Remove the saved OpenRouter and Hugging Face credentials from VS Code Secret Storage?",
+      { modal: true },
+      "Remove Secrets",
+      "Cancel"
+    );
+    if (choice !== "Remove Secrets") {
+      return;
+    }
+    await Promise.all([
+      this.context.secrets.delete(SECRET_OPENROUTER),
+      this.context.secrets.delete(SECRET_HUGGINGFACE)
+    ]);
+    await this.setProvider("ollama");
+    await this.postSettingsSnapshot();
+    void vscode3.window.showInformationMessage("OllamaUnofficial: cloud credentials removed.");
+  }
   async persistAllSessions() {
     await saveSessions(this.context.globalState, this.sessions, this.activeSessionId);
   }
@@ -1565,7 +1633,13 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     this.abortController = void 0;
     this.flushMessagesToActiveSession();
     const id = randomId();
-    this.sessions.push({ id, title: "New chat", updatedAt: Date.now(), messages: [] });
+    this.sessions.push({
+      id,
+      title: "New chat",
+      updatedAt: Date.now(),
+      archived: false,
+      messages: []
+    });
     this.activeSessionId = id;
     this.messages = [];
     this.attachments = [];
@@ -1573,6 +1647,7 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     void this.persistAllSessions();
     this.postMessage({ type: "cleared" });
     this.postSessionState();
+    this.postHistoryState();
     this.postMessage({ type: "status", status: "Idle" });
   }
   /** Legacy: treat as new session (tab) */
@@ -1584,7 +1659,7 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
       return;
     }
     const next = this.sessions.find((s) => s.id === id);
-    if (!next) {
+    if (!next || next.archived) {
       return;
     }
     this.requestGeneration += 1;
@@ -1598,15 +1673,16 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     void this.persistAllSessions();
     this.postThreadSnapshot();
     this.postSessionState();
+    this.postHistoryState();
     this.postMessage({ type: "status", status: "Idle" });
   }
   closeSession(id) {
-    if (this.sessions.length <= 1) {
+    if (this.getOpenSessions().length <= 1) {
       void vscode3.window.showInformationMessage("Keep at least one chat tab.");
       return;
     }
-    const idx = this.sessions.findIndex((s) => s.id === id);
-    if (idx < 0) {
+    const session = this.sessions.find((s) => s.id === id);
+    if (!session) {
       return;
     }
     this.requestGeneration += 1;
@@ -1615,9 +1691,14 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     if (id === this.activeSessionId) {
       this.flushMessagesToActiveSession();
     }
-    this.sessions.splice(idx, 1);
+    session.archived = true;
+    session.updatedAt = Date.now();
     if (id === this.activeSessionId) {
-      const fallback = this.sessions[Math.max(0, idx - 1)] ?? this.sessions[0];
+      const fallback = this.getOpenSessions().find((candidate) => candidate.id !== id);
+      if (!fallback) {
+        this.createNewSession();
+        return;
+      }
       this.activeSessionId = fallback.id;
       this.messages = fallback.messages.map((m) => ({ ...m }));
       this.attachments = [];
@@ -1626,6 +1707,18 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     }
     void this.persistAllSessions();
     this.postSessionState();
+    this.postHistoryState();
+  }
+  restoreSession(id) {
+    const session = this.sessions.find((s) => s.id === id);
+    if (!session) {
+      return;
+    }
+    session.archived = false;
+    session.updatedAt = Date.now();
+    this.switchSession(session.id);
+    this.postSessionState();
+    this.postHistoryState();
   }
   resolveWebviewView(webviewView, _resolveContext, _token) {
     this.webviewView = webviewView;
@@ -1653,18 +1746,39 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     void this.refreshModelList();
     this.postAttachments();
     this.postSessionState();
+    this.postHistoryState();
     this.postThreadSnapshot();
   }
   postSessionState() {
     this.postMessage({
       type: "sessionState",
       activeSessionId: this.activeSessionId,
-      sessions: this.sessions.map((s) => ({
+      sessions: this.getOpenSessions().map((s) => ({
         id: s.id,
         title: s.title,
         updatedAt: s.updatedAt
       })),
       provider: this.getProvider()
+    });
+  }
+  postHistoryState() {
+    const items = this.sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt).map((session) => {
+      const firstUser = session.messages.find((message) => message.role === "user")?.content ?? "";
+      const latest = session.messages.at(-1)?.content ?? "";
+      const previewSource = firstUser || latest || "Empty conversation";
+      return {
+        id: session.id,
+        title: session.title,
+        updatedAt: session.updatedAt,
+        archived: Boolean(session.archived),
+        messageCount: session.messages.length,
+        preview: previewSource.replace(/\s+/g, " ").trim().slice(0, 180)
+      };
+    });
+    this.postMessage({
+      type: "historyState",
+      activeSessionId: this.activeSessionId,
+      items
     });
   }
   postThreadSnapshot() {
@@ -1692,6 +1806,7 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
       openRouterFreeOnly: c.get("openRouterFreeOnly") ?? true,
       fileAccess: c.get("fileAccess") ?? "none",
       fileScope: c.get("fileScope") ?? "workspace",
+      approvalMode: c.get("approvalMode") ?? "ask",
       terminalAccess: c.get("terminalAccess") ?? false,
       gitAccess: c.get("gitAccess") ?? false
     });
@@ -1732,6 +1847,15 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
         vscode3.ConfigurationTarget.Global
       );
     }
+    if (message.fileAccess === "none" || message.fileAccess === "read" || message.fileAccess === "readwrite") {
+      await config.update("fileAccess", message.fileAccess, vscode3.ConfigurationTarget.Global);
+    }
+    if (message.fileScope === "workspace" || message.fileScope === "anywhere") {
+      await config.update("fileScope", message.fileScope, vscode3.ConfigurationTarget.Global);
+    }
+    if (message.approvalMode === "ask" || message.approvalMode === "auto" || message.approvalMode === "chat") {
+      await config.update("approvalMode", message.approvalMode, vscode3.ConfigurationTarget.Global);
+    }
     if (typeof message.terminalAccess === "boolean") {
       await config.update("terminalAccess", message.terminalAccess, vscode3.ConfigurationTarget.Global);
     }
@@ -1762,6 +1886,7 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     session.updatedAt = Date.now();
     await this.persistAllSessions();
     this.postSessionState();
+    this.postHistoryState();
   }
   getSamplingConfig() {
     const c = vscode3.workspace.getConfiguration("ollamaCoderChat");
@@ -1815,8 +1940,16 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
       this.closeSession(message.id);
       return;
     }
+    if (message.type === "restoreSession") {
+      this.restoreSession(message.id);
+      return;
+    }
     if (message.type === "renameSession") {
       await this.renameSessionById(message.id);
+      return;
+    }
+    if (message.type === "getHistory") {
+      this.postHistoryState();
       return;
     }
     if (message.type === "removeAttachment") {
@@ -1888,6 +2021,14 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
       await this.handleGitPush();
       return;
     }
+    if (message.type === "showWelcome") {
+      await this.showWelcome();
+      return;
+    }
+    if (message.type === "logout") {
+      await this.logoutCloudProviders();
+      return;
+    }
     if (message.type === "stub") {
       void vscode3.window.showInformationMessage(
         `${this.titleCase(message.feature)} is not available yet.`
@@ -1923,7 +2064,7 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
     this.abortController = new AbortController();
     const model = this.getConfig("model", "llama3.2");
     const provider = this.getProvider();
-    const userContent = this.composeUserMessage(prompt);
+    const userContent = await this.composeUserMessage(prompt);
     this.messages.push({
       role: "user",
       content: userContent
@@ -2143,19 +2284,191 @@ var OllamaCoderChatViewProvider = class _OllamaCoderChatViewProvider {
       });
     }
   }
-  composeUserMessage(prompt) {
-    const block = this.formatAttachmentsBlock();
-    if (!block) {
-      return prompt;
+  async composeUserMessage(prompt) {
+    const sections = [];
+    const autoContext = await this.buildAutomaticContextBlock(prompt);
+    const attachmentBlock = this.formatAttachmentsBlock();
+    if (autoContext) {
+      sections.push(autoContext);
     }
-    return `${block}
----
-
-${prompt}`;
+    if (attachmentBlock) {
+      sections.push(attachmentBlock);
+    }
+    sections.push(prompt);
+    return sections.join("\n\n---\n\n");
   }
   clearAttachmentsAfterSend() {
     this.attachments = [];
     this.postAttachments();
+  }
+  async buildAutomaticContextBlock(prompt) {
+    const blocks = [];
+    const activeEditorBlock = this.buildActiveEditorContextBlock();
+    if (activeEditorBlock) {
+      blocks.push(activeEditorBlock);
+    }
+    const promptReferenceBlocks = await this.buildPromptReferenceBlocks(prompt);
+    if (promptReferenceBlocks.length) {
+      blocks.push(...promptReferenceBlocks);
+    }
+    if (!blocks.length) {
+      return "";
+    }
+    return `The editor automatically attached the following context:
+
+${blocks.join("\n\n")}`;
+  }
+  buildActiveEditorContextBlock() {
+    if (this.getFileAccess() === "none") {
+      return "";
+    }
+    const editor = vscode3.window.activeTextEditor;
+    if (!editor) {
+      return "";
+    }
+    const document = editor.document;
+    const relativePath = vscode3.workspace.asRelativePath(document.uri, false) || document.uri.fsPath;
+    const language = document.languageId && document.languageId !== "plaintext" ? document.languageId : "";
+    const blocks = [];
+    const selection = editor.selection;
+    if (!selection.isEmpty) {
+      const startLine = selection.start.line;
+      const endLine = selection.end.line;
+      const selectedText = document.getText(selection).trim();
+      if (selectedText) {
+        blocks.push(
+          `### Current selection: ${relativePath}#${startLine + 1}-${endLine + 1}
+\`\`\`${language}
+${this.truncateContext(selectedText, 3500)}
+\`\`\``
+        );
+      }
+    }
+    let fileSnippet = "";
+    if (!selection.isEmpty) {
+      const startLine = Math.max(0, selection.start.line - 20);
+      const endLine = Math.min(document.lineCount - 1, selection.end.line + 20);
+      fileSnippet = this.getDocumentLineSlice(document, startLine, endLine);
+    } else {
+      fileSnippet = document.getText();
+    }
+    const header = `### Active file: ${relativePath}
+Language: ${document.languageId} | Lines: ${document.lineCount}`;
+    blocks.push(
+      `${header}
+\`\`\`${language}
+${this.truncateContext(fileSnippet, 7500)}
+\`\`\``
+    );
+    return blocks.join("\n\n");
+  }
+  async buildPromptReferenceBlocks(prompt) {
+    if (this.getFileAccess() === "none") {
+      return [];
+    }
+    const refs = this.extractPromptReferences(prompt).slice(0, 6);
+    const blocks = [];
+    for (const ref of refs) {
+      const uri = await this.resolvePromptReference(ref.path);
+      if (!uri) {
+        continue;
+      }
+      try {
+        const document = await vscode3.workspace.openTextDocument(uri);
+        const language = document.languageId && document.languageId !== "plaintext" ? document.languageId : "";
+        const relativePath = vscode3.workspace.asRelativePath(uri, false) || uri.fsPath;
+        const startLine = ref.startLine ? Math.max(1, ref.startLine) : 1;
+        const endLine = ref.endLine ? Math.max(startLine, ref.endLine) : ref.startLine ? startLine : Math.min(document.lineCount, 160);
+        const snippet = this.getDocumentLineSlice(document, startLine - 1, endLine - 1);
+        blocks.push(
+          `### Referenced file: ${relativePath}#${startLine}-${endLine}
+\`\`\`${language}
+${this.truncateContext(snippet, 5500)}
+\`\`\``
+        );
+      } catch (error) {
+        this.log.appendLine(`[prompt-ref] ${ref.path}: ${String(error)}`);
+      }
+    }
+    return blocks;
+  }
+  extractPromptReferences(prompt) {
+    const refs = /* @__PURE__ */ new Map();
+    const pushRef = (pathValue, start, end) => {
+      const cleanPath = pathValue.trim().replace(/[),.;:]+$/, "");
+      if (!cleanPath) {
+        return;
+      }
+      const startLine = start ? Number.parseInt(start, 10) : void 0;
+      const endLine = end ? Number.parseInt(end, 10) : void 0;
+      const key = `${cleanPath}#${startLine ?? ""}-${endLine ?? ""}`;
+      if (!refs.has(key)) {
+        refs.set(key, {
+          path: cleanPath,
+          startLine: Number.isFinite(startLine) ? startLine : void 0,
+          endLine: Number.isFinite(endLine) ? endLine : void 0
+        });
+      }
+    };
+    const mentionPattern = /(?:^|\s)@([^\s#]+)(?:#L?(\d+)(?:-L?(\d+))?)?/g;
+    const directPattern = /(?:^|\s)([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+)#L?(\d+)(?:-L?(\d+))?/g;
+    for (const match of prompt.matchAll(mentionPattern)) {
+      pushRef(match[1] ?? "", match[2], match[3]);
+    }
+    for (const match of prompt.matchAll(directPattern)) {
+      pushRef(match[1] ?? "", match[2], match[3]);
+    }
+    return [...refs.values()];
+  }
+  async resolvePromptReference(refPath) {
+    const normalized = refPath.replaceAll("/", nodePath2.sep).replaceAll("\\", nodePath2.sep);
+    if (nodePath2.isAbsolute(normalized)) {
+      return this.getFileScope() === "anywhere" ? vscode3.Uri.file(normalized) : void 0;
+    }
+    const openDocument = vscode3.workspace.textDocuments.find((doc) => {
+      const relative = vscode3.workspace.asRelativePath(doc.uri, false);
+      return relative === refPath || relative === normalized || nodePath2.basename(doc.uri.fsPath) === refPath;
+    });
+    if (openDocument) {
+      return openDocument.uri;
+    }
+    const workspaceFolders = vscode3.workspace.workspaceFolders ?? [];
+    for (const folder of workspaceFolders) {
+      const candidate = vscode3.Uri.joinPath(folder.uri, ...normalized.split(nodePath2.sep).filter(Boolean));
+      try {
+        await vscode3.workspace.fs.stat(candidate);
+        return candidate;
+      } catch {
+      }
+    }
+    const basename2 = nodePath2.basename(normalized);
+    if (workspaceFolders.length && basename2) {
+      const matches = await vscode3.workspace.findFiles(
+        `**/${basename2}`,
+        "**/{node_modules,.git,dist,release,out,build}/**",
+        8
+      );
+      const preferred = matches.find((uri) => {
+        const relative = vscode3.workspace.asRelativePath(uri, false);
+        return relative === refPath || relative.endsWith(refPath) || relative.endsWith(normalized);
+      });
+      return preferred ?? matches[0];
+    }
+    return void 0;
+  }
+  getDocumentLineSlice(document, startLine, endLine) {
+    const safeStart = Math.max(0, Math.min(document.lineCount - 1, startLine));
+    const safeEnd = Math.max(safeStart, Math.min(document.lineCount - 1, endLine));
+    const range = new vscode3.Range(safeStart, 0, safeEnd, document.lineAt(safeEnd).text.length);
+    return document.getText(range);
+  }
+  truncateContext(value, limit) {
+    if (value.length <= limit) {
+      return value;
+    }
+    return `${value.slice(0, limit)}
+
+[\u2026truncated\u2026]`;
   }
   formatAttachmentsBlock() {
     if (!this.attachments.length) {
@@ -2181,6 +2494,7 @@ ${parts.join("\n\n")}`;
     const approvalLine = approvalMode === "chat" ? "Workspace policy (chat-only): do not imply you modified files; provide snippets and instructions for the user to apply." : approvalMode === "auto" ? "Workspace policy (auto): present complete edits clearly so the user can apply them quickly." : "Workspace policy (ask): show full proposed changes; assume the user reviews and applies edits manually.";
     const providerLine = provider === "ollama" ? "Inference provider: local Ollama." : provider === "openrouter" ? "Inference provider: OpenRouter (cloud). Respect the user privacy; do not invent credentials." : "Inference provider: Hugging Face Inference (cloud).";
     const fileAccessLine = fileAccess === "readwrite" ? "File access: READ + WRITE. When proposing code for a specific file, start code block with: // File: path/to/file.ext" : fileAccess === "read" ? "File access: READ ONLY. You can see files the user attaches." : "File access: NONE. Work from what the user pastes.";
+    const editorContextLine = fileAccess === "none" ? "Editor context: automatic file and selection context is disabled until file access is enabled." : "Editor context: the active file, current selection, and prompt references like @path/to/file.ts or file.ts#5-10 may be attached automatically.";
     const terminalLine = terminalAccess ? "Terminal: ENABLED. Propose shell commands in bash blocks." : "Terminal: DISABLED.";
     const gitLine = gitAccess ? "Git: ENABLED. You may suggest git operations (status, diff, commit, push)." : "Git: DISABLED.";
     return [
@@ -2190,6 +2504,7 @@ ${parts.join("\n\n")}`;
       modeLine,
       approvalLine,
       fileAccessLine,
+      editorContextLine,
       terminalLine,
       gitLine,
       workspaceContext ? "Workspace folders:\n" + workspaceContext : "No workspace folders are open."
@@ -2377,6 +2692,10 @@ ${parts.join("\n\n")}`;
     return new TextDecoder("utf-8").decode(bytes);
   }
   async attachActiveEditorFile() {
+    if (this.getFileAccess() === "none") {
+      void vscode3.window.showWarningMessage("OllamaUnofficial: Enable file access in the settings first.");
+      return;
+    }
     const editor = vscode3.window.activeTextEditor;
     if (!editor) {
       void vscode3.window.showWarningMessage("No active editor to attach.");
@@ -2387,6 +2706,10 @@ ${parts.join("\n\n")}`;
     this.addAttachment(label, content);
   }
   async pickOpenEditorFile() {
+    if (this.getFileAccess() === "none") {
+      void vscode3.window.showWarningMessage("OllamaUnofficial: Enable file access in the settings first.");
+      return;
+    }
     const items = [];
     for (const group of vscode3.window.tabGroups.all) {
       for (const tab of group.tabs) {
@@ -2414,9 +2737,14 @@ ${parts.join("\n\n")}`;
     this.addAttachment(label, text);
   }
   async pickWorkspaceFile() {
+    if (this.getFileAccess() === "none") {
+      void vscode3.window.showWarningMessage("OllamaUnofficial: Enable file access in the settings first.");
+      return;
+    }
     const picked = await vscode3.window.showOpenDialog({
       canSelectMany: false,
-      openLabel: "Attach"
+      openLabel: "Attach",
+      defaultUri: vscode3.workspace.workspaceFolders?.[0]?.uri
     });
     if (!picked?.[0]) {
       return;
@@ -2427,6 +2755,10 @@ ${parts.join("\n\n")}`;
     this.addAttachment(label || uri.fsPath, text);
   }
   async handlePickLocalFile() {
+    if (this.getFileAccess() === "none") {
+      void vscode3.window.showWarningMessage("OllamaUnofficial: Enable file access in the settings first.");
+      return;
+    }
     const picked = await vscode3.window.showOpenDialog({
       canSelectMany: false,
       openLabel: "Attach to Chat",
@@ -2453,6 +2785,10 @@ data:${mime};base64,${b64.substring(0, 200)}\u2026 (${bytes.byteLength} bytes)`)
     }
   }
   async attachActiveProblems() {
+    if (this.getFileAccess() === "none") {
+      void vscode3.window.showWarningMessage("OllamaUnofficial: Enable file access in the settings first.");
+      return;
+    }
     const editor = vscode3.window.activeTextEditor;
     if (!editor) {
       void vscode3.window.showWarningMessage("No active editor for problems.");
@@ -2575,6 +2911,10 @@ data:${mime};base64,${b64.substring(0, 200)}\u2026 (${bytes.byteLength} bytes)`)
     const raw = vscode3.workspace.getConfiguration("ollamaCoderChat").get("fileAccess");
     return raw === "read" || raw === "readwrite" ? raw : "none";
   }
+  getFileScope() {
+    const raw = vscode3.workspace.getConfiguration("ollamaCoderChat").get("fileScope");
+    return raw === "anywhere" ? "anywhere" : "workspace";
+  }
   getTerminalAccess() {
     return vscode3.workspace.getConfiguration("ollamaCoderChat").get("terminalAccess") ?? false;
   }
@@ -2585,6 +2925,12 @@ data:${mime};base64,${b64.substring(0, 200)}\u2026 (${bytes.byteLength} bytes)`)
   async handleOpenFile(filePath) {
     if (this.getFileAccess() === "none") {
       void vscode3.window.showWarningMessage("OllamaUnofficial: Enable file access in the settings first.");
+      return;
+    }
+    if (nodePath2.isAbsolute(filePath) && this.getFileScope() !== "anywhere") {
+      void vscode3.window.showWarningMessage(
+        'OllamaUnofficial: Absolute file paths require "Anywhere" file scope in settings.'
+      );
       return;
     }
     const ws = vscode3.workspace.workspaceFolders?.[0];
@@ -2618,6 +2964,12 @@ data:${mime};base64,${b64.substring(0, 200)}\u2026 (${bytes.byteLength} bytes)`)
         saveLabel: "Apply to this file"
       });
       if (!picked) return;
+      if (!vscode3.workspace.getWorkspaceFolder(picked) && this.getFileScope() !== "anywhere") {
+        void vscode3.window.showWarningMessage(
+          'OllamaUnofficial: Saving outside the workspace requires "Anywhere" file scope.'
+        );
+        return;
+      }
       targetUri = picked;
     }
     try {
@@ -2876,7 +3228,9 @@ ${lines.join("\n")}` });
         <select id='modelSelect' class='model-pill' title='Model'>
           <option value='${escapeHtml(model)}'>${escapeHtml(model)}</option>
         </select>
+        <button type='button' class='icon-only' id='historyBtn' title='Search chat history'>\u2315</button>
         <button type='button' class='icon-only' id='refreshModelsBtn' title='Refresh models'>\u21BB</button>
+        <button type='button' class='icon-only' id='helpBtn' title='Welcome and walkthrough'>?</button>
         <button type='button' class='icon-only' id='settingsBtn' title='Chat settings (keys, temperature\u2026)'>\u2699</button>
         <button type='button' class='icon-only' id='newChatBtn' title='New chat tab'>+</button>
       </div>
@@ -2982,49 +3336,121 @@ ${lines.join("\n")}` });
           <button type='button' class='icon-only settings-close' id='settingsCloseBtn' title='Close'>\xD7</button>
         </div>
         <div class='settings-body'>
-          <label class='settings-label'>OpenRouter API key <span class='settings-hint' id='orKeyHint'></span></label>
-          <input type='password' class='settings-input' id='inputOpenRouterKey' autocomplete='off' placeholder='sk-or-\u2026' />
+          <section class='settings-section'>
+            <div class='settings-section-title'>Providers</div>
 
-          <label class='settings-label'>Hugging Face token <span class='settings-hint' id='hfKeyHint'></span></label>
-          <input type='password' class='settings-input' id='inputHfKey' autocomplete='off' placeholder='hf_\u2026' />
-
-          <div class='settings-row'>
-            <div class='settings-field'>
-              <label class='settings-label' for='inputTemperature'>Temperature</label>
-              <input type='number' class='settings-input' id='inputTemperature' min='0' max='2' step='0.05' />
+            <div class='settings-field-group'>
+              <label class='settings-label'>OpenRouter API key <span class='settings-hint' id='orKeyHint'></span></label>
+              <div class='settings-pw-wrap'>
+                <input type='password' class='settings-input' id='inputOpenRouterKey' autocomplete='off' placeholder='sk-or-\u2026' />
+                <button type='button' class='settings-pw-toggle' id='toggleOrKey' title='Show or hide OpenRouter key'>\u{1F441}</button>
+              </div>
             </div>
-            <div class='settings-field'>
-              <label class='settings-label' for='inputMaxTokens'>Max tokens</label>
-              <input type='number' class='settings-input' id='inputMaxTokens' min='1' max='128000' step='1' />
-            </div>
-            <div class='settings-field'>
-              <label class='settings-label' for='inputTopP'>Top P</label>
-              <input type='number' class='settings-input' id='inputTopP' min='0.01' max='1' step='0.01' />
-            </div>
-          </div>
 
-          <label class='settings-check'>
-            <input type='checkbox' id='chkOpenRouterFreeOnly' />
-            <span>OpenRouter model list: free ($0) only</span>
-          </label>
+            <div class='settings-field-group'>
+              <label class='settings-label'>Hugging Face token <span class='settings-hint' id='hfKeyHint'></span></label>
+              <div class='settings-pw-wrap'>
+                <input type='password' class='settings-input' id='inputHfKey' autocomplete='off' placeholder='hf_\u2026' />
+                <button type='button' class='settings-pw-toggle' id='toggleHfKey' title='Show or hide Hugging Face token'>\u{1F441}</button>
+              </div>
+            </div>
 
-          <div style='border-top:1px solid rgba(255,255,255,0.1);margin:16px 0;padding-top:16px;'>
-            <h3 style='margin:0 0 12px 0;font-size:13px;font-weight:600;opacity:0.9;'>Workspace & Terminal</h3>
+            <label class='settings-check'>
+              <input type='checkbox' id='chkOpenRouterFreeOnly' />
+              <span>OpenRouter model list: free ($0) only</span>
+            </label>
+          </section>
+
+          <section class='settings-section'>
+            <div class='settings-section-title'>Workspace</div>
+
+            <div class='settings-field-group'>
+              <label class='settings-label' for='selectApprovalMode'>Approval mode</label>
+              <select class='settings-input' id='selectApprovalMode'>
+                <option value='ask'>Normal mode: approve edits first</option>
+                <option value='auto'>Auto-accept mode</option>
+                <option value='chat'>Chat only</option>
+              </select>
+              <div class='settings-field-hint'>Choose how strongly the assistant should act on edits.</div>
+            </div>
+
+            <div class='settings-field-group'>
+              <label class='settings-label' for='selectFileAccess'>File access</label>
+              <select class='settings-input' id='selectFileAccess'>
+                <option value='none'>Off</option>
+                <option value='read'>Read only</option>
+                <option value='readwrite'>Read + write</option>
+              </select>
+            </div>
+
+            <div class='settings-field-group'>
+              <label class='settings-label' for='selectFileScope'>File scope</label>
+              <select class='settings-input' id='selectFileScope'>
+                <option value='workspace'>Workspace only</option>
+                <option value='anywhere'>Anywhere on disk</option>
+              </select>
+            </div>
+
             <label class='settings-check'>
               <input type='checkbox' id='chkTerminalAccess' />
               <span>Allow terminal command execution</span>
             </label>
+
             <label class='settings-check'>
               <input type='checkbox' id='chkGitAccess' />
               <span>Allow git operations (status, diff, commit, push)</span>
             </label>
-          </div>
+          </section>
 
-          <p class='settings-footnote'>Secrets are stored in VS Code Secret Storage, not settings.json.</p>
+          <section class='settings-section'>
+            <div class='settings-section-title'>Sampling</div>
+            <div class='settings-row'>
+              <div class='settings-field'>
+                <label class='settings-label' for='inputTemperature'>Temperature</label>
+                <input type='number' class='settings-input' id='inputTemperature' min='0' max='2' step='0.05' />
+              </div>
+              <div class='settings-field'>
+                <label class='settings-label' for='inputMaxTokens'>Max tokens</label>
+                <input type='number' class='settings-input' id='inputMaxTokens' min='1' max='128000' step='1' />
+              </div>
+              <div class='settings-field'>
+                <label class='settings-label' for='inputTopP'>Top P</label>
+                <input type='number' class='settings-input' id='inputTopP' min='0.01' max='1' step='0.01' />
+              </div>
+            </div>
+          </section>
+
+          <p class='settings-footnote'>Secrets are stored in VS Code Secret Storage, not settings.json. File access controls editor context, attachments, mentions, and direct edits.</p>
         </div>
         <div class='settings-actions'>
+          <span class='settings-saved-toast' id='settingsSavedToast'>Saved</span>
+          <button type='button' class='tool-btn' id='logoutBtn'>Logout</button>
           <button type='button' class='tool-btn' id='settingsCancelBtn'>Cancel</button>
           <button type='button' class='settings-save-btn' id='settingsSaveBtn'>Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id='historyOverlay' class='settings-overlay hidden' aria-hidden='true'>
+      <div class='settings-panel history-panel' id='historyPanelInner' role='dialog' aria-labelledby='historyTitle'>
+        <div class='settings-header'>
+          <span id='historyTitle' class='settings-title'>Session history</span>
+          <button type='button' class='icon-only settings-close' id='historyCloseBtn' title='Close'>\xD7</button>
+        </div>
+        <div class='settings-body'>
+          <section class='settings-section'>
+            <div class='settings-field-group'>
+              <label class='settings-label' for='historySearch'>Search chats</label>
+              <input type='text' class='settings-input' id='historySearch' placeholder='Keyword, file name, feature\u2026' />
+            </div>
+            <div class='history-filters' id='historyRange'>
+              <button type='button' class='history-filter active' data-range='all'>All</button>
+              <button type='button' class='history-filter' data-range='today'>Today</button>
+              <button type='button' class='history-filter' data-range='week'>7 days</button>
+              <button type='button' class='history-filter' data-range='month'>30 days</button>
+            </div>
+          </section>
+          <div class='history-list' id='historyList'></div>
         </div>
       </div>
     </div>
@@ -3096,12 +3522,29 @@ function activate(context) {
     })
   );
   context.subscriptions.push(
+    vscode3.commands.registerCommand("ollamaCoderChat.showWelcome", async () => {
+      await provider.showWelcome();
+    })
+  );
+  context.subscriptions.push(
+    vscode3.commands.registerCommand("ollamaCoderChat.logout", async () => {
+      await provider.logoutCloudProviders();
+    })
+  );
+  context.subscriptions.push(
     vscode3.commands.registerCommand("ollamaCoderChat.openBrowser", () => {
       BrowserPanel.createOrShow(context, (msg) => {
         provider.postMessagePublic(msg);
       });
     })
   );
+  const onboardingShown = context.globalState.get(ONBOARDING_KEY) ?? false;
+  if (!onboardingShown) {
+    void context.globalState.update(ONBOARDING_KEY, true);
+    setTimeout(() => {
+      void provider.showWelcome();
+    }, 1800);
+  }
   checkForUpdates(context, provider.getLog());
 }
 function deactivate() {

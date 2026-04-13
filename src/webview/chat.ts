@@ -22,6 +22,15 @@ type SessionTab = {
   title: string;
 };
 
+type HistoryItem = {
+  id: string;
+  title: string;
+  preview: string;
+  updatedAt: number;
+  archived: boolean;
+  messageCount: number;
+};
+
 const vscode = acquireVsCodeApi();
 
 marked.setOptions({
@@ -57,6 +66,11 @@ function stripThinkingBlocks(text: string): { visible: string; thinking: string 
     thinking += (thinking ? '\n\n' : '') + inner.trim();
     return '';
   }).trim();
+  const headingMatch = /^### Reasoning\s+([\s\S]*?)\s+### Answer\s+([\s\S]*)$/m.exec(visible);
+  if (headingMatch) {
+    thinking += (thinking ? '\n\n' : '') + headingMatch[1].trim();
+    visible = headingMatch[2].trim();
+  }
   // If there's an unclosed <think> at the end (still streaming), strip it too
   const openIdx = visible.lastIndexOf('<think>');
   if (openIdx !== -1) {
@@ -151,6 +165,8 @@ const newChatBtn = getEl<HTMLButtonElement>('newChatBtn');
 const refreshModelsBtn = getEl<HTMLButtonElement>('refreshModelsBtn');
 const modelSelect = getEl<HTMLSelectElement>('modelSelect');
 const providerSelect = getEl<HTMLSelectElement>('providerSelect');
+const historyBtn = getEl<HTMLButtonElement>('historyBtn');
+const helpBtn = getEl<HTMLButtonElement>('helpBtn');
 const sessionBar = getEl<HTMLElement>('sessionBar');
 const attachBtn = getEl<HTMLButtonElement>('attachBtn');
 const browseBtn = getElOpt<HTMLButtonElement>('browseBtn');
@@ -167,6 +183,7 @@ const settingsCloseBtn = getEl<HTMLButtonElement>('settingsCloseBtn');
 const settingsCancelBtn = getEl<HTMLButtonElement>('settingsCancelBtn');
 const settingsSaveBtn = getEl<HTMLButtonElement>('settingsSaveBtn');
 const settingsSavedToast = getEl<HTMLElement>('settingsSavedToast');
+const logoutBtn = getEl<HTMLButtonElement>('logoutBtn');
 const inputOpenRouterKey = getEl<HTMLInputElement>('inputOpenRouterKey');
 const inputHfKey = getEl<HTMLInputElement>('inputHfKey');
 const inputTemperature = getEl<HTMLInputElement>('inputTemperature');
@@ -179,10 +196,20 @@ const settingsPanelInner = getEl<HTMLElement>('settingsPanelInner');
 const toggleOrKey = getEl<HTMLButtonElement>('toggleOrKey');
 const toggleHfKey = getEl<HTMLButtonElement>('toggleHfKey');
 const selectFileAccess = getEl<HTMLSelectElement>('selectFileAccess');
+const selectFileScope = getEl<HTMLSelectElement>('selectFileScope');
+const selectApprovalMode = getEl<HTMLSelectElement>('selectApprovalMode');
 const chkTerminalAccess = getEl<HTMLInputElement>('chkTerminalAccess');
 const chkGitAccess = getEl<HTMLInputElement>('chkGitAccess');
+const historyOverlay = getEl<HTMLElement>('historyOverlay');
+const historyPanelInner = getEl<HTMLElement>('historyPanelInner');
+const historyCloseBtn = getEl<HTMLButtonElement>('historyCloseBtn');
+const historySearch = getEl<HTMLInputElement>('historySearch');
+const historyList = getEl<HTMLElement>('historyList');
 
 settingsPanelInner.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+historyPanelInner.addEventListener('click', (event) => {
   event.stopPropagation();
 });
 
@@ -194,6 +221,8 @@ let attachments: AttachmentChip[] = [];
 let ignoreModelSelectChange = false;
 let sessions: SessionTab[] = [];
 let activeSessionId = '';
+let historyItems: HistoryItem[] = [];
+let historyRange: 'all' | 'today' | 'week' | 'month' = 'all';
 
 function setBusy(isBusy: boolean): void {
   busy = isBusy;
@@ -203,6 +232,7 @@ function setBusy(isBusy: boolean): void {
   sendBtn.toggleAttribute('disabled', isBusy);
   newChatBtn.toggleAttribute('disabled', isBusy);
   settingsBtn.toggleAttribute('disabled', isBusy);
+  historyBtn.toggleAttribute('disabled', isBusy);
 }
 
 function setStatus(text: string): void {
@@ -293,12 +323,29 @@ function renderSessionBar(): void {
 }
 
 function openSettingsPanel(): void {
+  historyOverlay.classList.add('hidden');
+  historyOverlay.setAttribute('aria-hidden', 'true');
   vscode.postMessage({ type: 'getSettings' });
 }
 
 function closeSettingsPanel(): void {
   settingsOverlay.classList.add('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'true');
+  mainView.classList.remove('hidden');
+}
+
+function openHistoryPanel(): void {
+  closeSettingsPanel();
+  vscode.postMessage({ type: 'getHistory' });
+  mainView.classList.add('hidden');
+  historyOverlay.classList.remove('hidden');
+  historyOverlay.setAttribute('aria-hidden', 'false');
+  historySearch.focus();
+}
+
+function closeHistoryPanel(): void {
+  historyOverlay.classList.add('hidden');
+  historyOverlay.setAttribute('aria-hidden', 'true');
   mainView.classList.remove('hidden');
 }
 
@@ -319,6 +366,8 @@ function applySettingsForm(message: Record<string, unknown>): void {
   inputTopP.value = String(message.topP ?? 1);
   chkOpenRouterFreeOnly.checked = Boolean(message.openRouterFreeOnly);
   selectFileAccess.value = String(message.fileAccess ?? 'none');
+  selectFileScope.value = String(message.fileScope ?? 'workspace');
+  selectApprovalMode.value = String(message.approvalMode ?? 'ask');
   chkTerminalAccess.checked = Boolean(message.terminalAccess);
   chkGitAccess.checked = Boolean(message.gitAccess);
   updateCapabilityBadges(String(message.fileAccess ?? 'none'), Boolean(message.terminalAccess), Boolean(message.gitAccess));
@@ -329,8 +378,86 @@ function applySettingsForm(message: Record<string, unknown>): void {
   inputMaxTokens.classList.remove('invalid');
 
   mainView.classList.add('hidden');
+  closeHistoryPanel();
   settingsOverlay.classList.remove('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'false');
+}
+
+function formatHistoryDate(value: number): string {
+  const date = new Date(value);
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date);
+}
+
+function isHistoryItemVisible(item: HistoryItem): boolean {
+  const query = historySearch.value.trim().toLowerCase();
+  const haystack = `${item.title} ${item.preview}`.toLowerCase();
+
+  if (query && !haystack.includes(query)) {
+    return false;
+  }
+
+  if (historyRange === 'all') {
+    return true;
+  }
+
+  const ageMs = Date.now() - item.updatedAt;
+  if (historyRange === 'today') {
+    return ageMs <= 24 * 60 * 60 * 1000;
+  }
+  if (historyRange === 'week') {
+    return ageMs <= 7 * 24 * 60 * 60 * 1000;
+  }
+  return ageMs <= 30 * 24 * 60 * 60 * 1000;
+}
+
+function renderHistoryList(): void {
+  historyList.innerHTML = '';
+  const visibleItems = historyItems.filter(isHistoryItemVisible);
+
+  if (!visibleItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = 'No matching sessions yet.';
+    historyList.appendChild(empty);
+    return;
+  }
+
+  for (const item of visibleItems) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `history-item${item.id === activeSessionId ? ' active' : ''}`;
+    row.addEventListener('click', () => {
+      vscode.postMessage({
+        type: item.archived ? 'restoreSession' : 'switchSession',
+        id: item.id,
+      });
+      closeHistoryPanel();
+    });
+
+    const top = document.createElement('div');
+    top.className = 'history-item-top';
+    const title = document.createElement('span');
+    title.className = 'history-item-title';
+    title.textContent = item.title;
+    const meta = document.createElement('span');
+    meta.className = 'history-item-meta';
+    meta.textContent = `${formatHistoryDate(item.updatedAt)} · ${item.messageCount} msg${item.messageCount === 1 ? '' : 's'}${item.archived ? ' · archived' : ''}`;
+    top.appendChild(title);
+    top.appendChild(meta);
+
+    const preview = document.createElement('div');
+    preview.className = 'history-item-preview';
+    preview.textContent = item.preview || 'Empty conversation';
+
+    row.appendChild(top);
+    row.appendChild(preview);
+    historyList.appendChild(row);
+  }
 }
 
 function renderThread(msgs: ThreadMessage[]): void {
@@ -508,6 +635,18 @@ newChatBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'newSession' });
 });
 
+historyBtn.addEventListener('click', () => {
+  if (!historyOverlay.classList.contains('hidden')) {
+    closeHistoryPanel();
+    return;
+  }
+  openHistoryPanel();
+});
+
+helpBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'showWelcome' });
+});
+
 settingsBtn.addEventListener('click', () => {
   if (!settingsOverlay.classList.contains('hidden')) {
     closeSettingsPanel();
@@ -528,6 +667,42 @@ settingsOverlay.addEventListener('click', (event) => {
   if (event.target === settingsOverlay) {
     closeSettingsPanel();
   }
+});
+
+historyCloseBtn.addEventListener('click', () => {
+  closeHistoryPanel();
+});
+
+historyOverlay.addEventListener('click', (event) => {
+  if (event.target === historyOverlay) {
+    closeHistoryPanel();
+  }
+});
+
+historySearch.addEventListener('input', () => {
+  renderHistoryList();
+});
+
+document.querySelectorAll<HTMLButtonElement>('.history-filter').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    historyRange = (btn.dataset.range as 'all' | 'today' | 'week' | 'month') ?? 'all';
+    document.querySelectorAll('.history-filter').forEach((candidate) => {
+      candidate.classList.toggle('active', candidate === btn);
+    });
+    renderHistoryList();
+  });
+});
+
+selectFileAccess.addEventListener('change', () => {
+  updateCapabilityBadges(selectFileAccess.value, chkTerminalAccess.checked, chkGitAccess.checked);
+});
+
+chkTerminalAccess.addEventListener('change', () => {
+  updateCapabilityBadges(selectFileAccess.value, chkTerminalAccess.checked, chkGitAccess.checked);
+});
+
+chkGitAccess.addEventListener('change', () => {
+  updateCapabilityBadges(selectFileAccess.value, chkTerminalAccess.checked, chkGitAccess.checked);
 });
 
 function clamp(value: number, min: number, max: number): number {
@@ -587,6 +762,10 @@ toggleHfKey.addEventListener('click', () => {
   togglePasswordVisibility(inputHfKey, toggleHfKey);
 });
 
+logoutBtn.addEventListener('click', () => {
+  vscode.postMessage({ type: 'logout' });
+});
+
 settingsSaveBtn.addEventListener('click', () => {
   if (!validateSettingsInputs()) {
     return;
@@ -603,6 +782,8 @@ settingsSaveBtn.addEventListener('click', () => {
     topP: Number.isFinite(topP) ? topP : undefined,
     openRouterFreeOnly: chkOpenRouterFreeOnly.checked,
     fileAccess: selectFileAccess.value,
+    fileScope: selectFileScope.value,
+    approvalMode: selectApprovalMode.value,
     terminalAccess: chkTerminalAccess.checked,
     gitAccess: chkGitAccess.checked,
   });
@@ -637,6 +818,20 @@ promptEl.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     submitPrompt();
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') {
+    return;
+  }
+
+  if (!settingsOverlay.classList.contains('hidden')) {
+    closeSettingsPanel();
+  }
+
+  if (!historyOverlay.classList.contains('hidden')) {
+    closeHistoryPanel();
   }
 });
 
@@ -733,6 +928,27 @@ window.addEventListener('message', (event) => {
         })
       : [];
     renderSessionBar();
+    renderHistoryList();
+    return;
+  }
+
+  if (message?.type === 'historyState') {
+    activeSessionId = String(message.activeSessionId ?? activeSessionId);
+    const raw = message.items;
+    historyItems = Array.isArray(raw)
+      ? raw.map((item) => {
+          const o = item as Record<string, unknown>;
+          return {
+            id: String(o.id ?? ''),
+            title: String(o.title ?? 'Chat'),
+            preview: String(o.preview ?? ''),
+            updatedAt: Number(o.updatedAt ?? 0),
+            archived: Boolean(o.archived),
+            messageCount: Number(o.messageCount ?? 0),
+          };
+        })
+      : [];
+    renderHistoryList();
     return;
   }
 
@@ -980,3 +1196,4 @@ syncModeUi();
 updateEmptyState();
 promptEl.focus();
 vscode.postMessage({ type: 'getModels' });
+vscode.postMessage({ type: 'getHistory' });
